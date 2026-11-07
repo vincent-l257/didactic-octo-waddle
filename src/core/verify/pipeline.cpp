@@ -2,6 +2,7 @@
 #include "basalt/core/verify.hpp"
 #include "basalt/core/on_device.hpp"
 #include "basalt/platform/compiler.hpp"
+#include "basalt/platform/system.hpp"
 #include "basalt/kernels/pdl.hpp"
 #include "basalt/core/progress.hpp"
 #include "basalt/kernels/verify_kernels.hpp"
@@ -185,6 +186,17 @@ bool Verifier::run_pair(Verifier& b, int ta, const int32_t* toka, int64_t pa, co
         _mm_pause();
     }
     progress_at("pipelined windows: finishing the window", ta);
+    // B's first stage polls mapped host flags until its stream ends. Finishing A reads mapped results. Where the
+    // driver pages device memory, that read waits until every such poll stops, so the host and B's card wait on
+    // each other. Serve B and wait for its stream first. Elsewhere the read does not wait on the other card, and
+    // A's finish stays overlapped with the rest of B.
+    if (tb > 0 && basalt::platform::gpu_memory_pages()) {
+        if (!b_done && !b0->run_serve(pool, userb, err)) return false;
+        const OnDevice on(b0->device_);
+        const cudaError_t se = cudaStreamSynchronize(b0->cs_);
+        if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
+        if (!b0->dm_end(err)) return false;
+    }
     return a1->run_end(outa, err) && a0->run_end(nullptr, err);
 }
 

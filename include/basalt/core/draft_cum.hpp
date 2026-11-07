@@ -33,6 +33,12 @@ DRAFT_CUM_HD inline bool draft_keep(const float* probs, int j, float th) {
     return c >= th;
 }
 
+/// draft_keep, and a per-draft floor: min_p > 0 drops a guess whose own probability is below it.
+DRAFT_CUM_HD inline bool draft_keep_p(const float* probs, int j, float th, float min_p) {
+    if (min_p > 0.0f && !(probs[j] >= min_p)) return false;
+    return draft_keep(probs, j, th);
+}
+
 /// The rule's base threshold: what a request starts from and the device graph's default.
 constexpr float kDraftCumBase0 = 0.35f;
 

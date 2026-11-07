@@ -149,10 +149,13 @@ static bool make_peer(core::PeerExperts* peer, int64_t T_max, int64_t cap_rows, 
     return true;
 }
 
-uint64_t Prefill::peer_bytes(int64_t chunk, bool streamed_share) {
+int64_t Prefill::routed_peer_limit() { return stream_all_min() - 1; }
+
+uint64_t Prefill::peer_bytes(int64_t chunk, bool streamed_share, bool fast_peer) {
     if (!mmq_plan().any) return 0;
     PeerPrefill pp;
-    pp.T_max = std::min<int64_t>(chunk, streamed_share ? stream_all_min() - 1 : kPeerSlowRows);
+    const int64_t unlike = fast_peer ? stream_all_min() - 1 : kPeerSlowRows;
+    pp.T_max = std::min<int64_t>(chunk, streamed_share ? stream_all_min() - 1 : unlike);
     const int64_t t_fp4 = !streamed_share || !fp4_every_layer() || fused_ring() || stream_all_min() < FP4_MIN_TOKENS
                               ? 0 : std::min<int64_t>(chunk, kPeerFp4Tokens);
     const int64_t tf = t_fp4 >= stream_all_min() ? t_fp4 : 0;
@@ -162,17 +165,20 @@ uint64_t Prefill::peer_bytes(int64_t chunk, bool streamed_share) {
     return sum;
 }
 
-bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, bool streamed_share, std::string& err) {
+bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, bool streamed_share, std::string& err,
+                       bool fast_peer) {
     Impl& m = *impl_;
     if (peer == nullptr || !peer->valid()) { m.pp.reset(); return true; }
     // The peer takes the rows of the routed-only chunks (below stream_all_min()): the activations and
     // result rows cross through host staging (cudaMemcpyPeerAsync) and the streamed ring stays off.  It also takes
     // those of a streamed chunk of up to kPeerFp4Tokens (PeerPrefill::T_fp4) where those buffers fit too.
+    // A peer as fast as the main card joins every routed chunk, not only the first 2559 rows.
     if (!mmq_plan().any) { err = "prefill peer: needs the MMQ prompt path"; return false; }
     const int64_t t_fp4 = !streamed_share || !fp4_every_layer() || fused_ring() || stream_all_min() < FP4_MIN_TOKENS
                               ? 0 : std::min<int64_t>(m.T_max, kPeerFp4Tokens);
     std::unique_ptr<PeerPrefill> pp;
-    const int64_t t_routed = streamed_share ? m.T_max : std::min<int64_t>(m.T_max, kPeerSlowRows);
+    const int64_t unlike = fast_peer ? stream_all_min() - 1 : kPeerSlowRows;
+    const int64_t t_routed = streamed_share ? m.T_max : std::min<int64_t>(m.T_max, unlike);
     bool ok = make_peer(peer, t_routed, cap_rows, t_fp4 >= stream_all_min() ? t_fp4 : 0, pp, err);
     if (!ok && t_fp4 >= stream_all_min()) {   // the routed-only chunks alone
         pp.reset();

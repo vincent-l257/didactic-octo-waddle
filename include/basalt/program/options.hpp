@@ -139,6 +139,8 @@ struct Options {
     /// `spec_corrupt` N > 0 replaces every Nth draft with a wrong token.
     int spec = 0;
     bool spec_given = false;      // --spec on the command line
+    /// --spec-min-p P: a draft below this probability does not extend the verify window (0 = the cumulative rule only).
+    float spec_min_p = 0.0f;
     /// --relaxed-drafting [P]: under sampling, a draft the target gives probability >= P is kept even when the target's
     /// own draw differs (0 = exact; the flag alone = kRelaxedDraftingDefault).  This changes the output distribution:
     /// docs/precision/features.md.  Solo decode only; a request's relax=P key overrides it.
@@ -173,6 +175,8 @@ struct Options {
     /// The share (0..1) of each layer's distinct missed experts the GPU reads over PCIe from the pinned arena while the
     /// CPU computes the rest (host-planned verify windows).  Set from the startup link probe.
     double pcie_frac = -1.0;
+    /// The peer card's memory is at least 90% of the main card's, so a long routed prefill chunk uses it.
+    bool fast_peer = false;
     /// Every `adapt_every` rounds, swap up to `adapt_swaps` of the most-routed missing experts into the VRAM tier in
     /// place of the least-routed resident ones (decayed counts).  0 = static residency.
     int adapt_every = 4;
@@ -188,8 +192,9 @@ struct Options {
     bool stop_eos = false;
     std::vector<int64_t> eos_ids = {248044, 248046};
     /// --serve, multi-GPU layer split: "K" or "K1,K2,.." (the first layer of each later stage) or "auto" (placed
-    /// from each GPU's free VRAM); empty = one GPU
+    /// from each GPU's free VRAM). "off" keeps the expert tier. Two GPUs default to auto.
     std::string layer_split;
+    bool layer_split_given = false;
     /// the later stages' devices "D1,D2,.." (default: the next visible GPUs; "0" with one K: both stages on this
     /// GPU, sharing everything - the bit-exact A/B of the hand-off)
     std::string split_device;

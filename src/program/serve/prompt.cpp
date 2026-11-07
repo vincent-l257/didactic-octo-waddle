@@ -310,7 +310,17 @@ int Runtime::init_prompt() {
             // the operator's ceiling (auto_ceiling keeps a bare `auto` at 8192)
             return engine_local::biggest_chunk(auto_ceiling, [&](int64_t t) -> bool { return fits(t, true, only); });
         };
-        const int64_t chunk = scan(nullptr);
+        int64_t chunk = scan(nullptr);
+        // Expert tier: a chunk at or above the streamed floor skips the peer. A peer as fast as the main card
+        // keeps the chunk on the routed path so it computes the experts it holds.
+        if (o.fast_peer && o.layer_split.empty()) {
+            const int64_t cap = basalt::prefill::Prefill::routed_peer_limit();
+            if (chunk > cap) {
+                basalt::log::info("basalt serve", "prompt chunk %lld -> %lld tokens so the peer GPU computes "
+                                     "the experts it holds", (long long) chunk, (long long) cap);
+                chunk = cap;
+            }
+        }
         // A small card in a layer split caps every stage's chunk.  Named when it bites, so the regression is one
         // log line: each stage that cannot fund the chunk CUDA0 alone would read in.
         const int64_t alone = pf_parts.size() > 1 ? scan(&pf_parts[0]) : chunk;
@@ -484,7 +494,7 @@ int Runtime::init_prompt() {
     if (peer.valid() && o.peer_exclusive) sp.set_ring_peer(&peer);
     if (peer.valid() && o.peer_prefill_rows != 0) {
         const int64_t rows = o.peer_prefill_rows > 0 ? o.peer_prefill_rows : o.prefill_chunk * K / 2;
-        if (!sp.set_peer(&peer, rows, peer_streamed_share, err)) {
+        if (!sp.set_peer(&peer, rows, peer_streamed_share, err, o.fast_peer)) {
             basalt::log::warn("basalt serve", "%s - the prompt path stays on the primary GPU", err.c_str());
             err.clear();
         }

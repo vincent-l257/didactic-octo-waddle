@@ -33,7 +33,7 @@ int prompt_split(Context& context) {
                         : !src.complement_ready() ? "no RAM copy of the experts"
                         : !o.cvec_files.empty() ? "a control vector"
                         : !basalt::prefill::Prefill::fp4_experts() ? "priced for NVFP4 experts only" : nullptr;
-        if (off == nullptr && main_link_gbps <= 0) main_link_gbps = probe_pcie_h2d_gbps();   // (a set --pcie-frac skips it)
+        if (off == nullptr && main_link_gbps <= 0 && o.pcie_frac < 0.0) main_link_gbps = probe_pcie_h2d_gbps();
         if (off == nullptr) {
             std::vector<double> bw;
             for (int dev : o.peer_devices) bw.push_back((size_t) dev < chosen_cards.size() ? chosen_cards[(size_t) dev].mem_gbps : 0);

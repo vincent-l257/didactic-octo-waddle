@@ -125,14 +125,16 @@ int sessions(Context& context) {
             }
             basalt::kernels::mrope_table_set(st.mrope);
         }
-        // its own PCIe share of the missed experts (the same rule as CUDA0's above: its link is probed)
+        // its own PCIe share of the missed experts. A set --pcie-frac applies to every stage.
         st.pcie_frac = o.pcie_frac;
-        {
+        if (o.pcie_frac < 0.0) {
             std::string bursts;
             const double bw = probe_pcie_h2d_gbps(&bursts);
             if (bw > 0.0) st.pcie_frac = pcie_frac_for_gbps(bw, 0.55);
             basalt::log::info("basalt generate", "layer split: CUDA%d PCIe probe %.1f GB/s (best of %s) -> pcie_frac "
                                  "%.2f", st.dev, bw, bursts.c_str(), st.pcie_frac);
+        } else {
+            basalt::log::info("basalt generate", "layer split: CUDA%d pcie_frac %.2f", st.dev, st.pcie_frac);
         }
         size_t fb = 0, tb = 0;
         cudaMemGetInfo(&fb, &tb);

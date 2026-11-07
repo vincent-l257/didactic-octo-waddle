@@ -68,8 +68,14 @@ int run(int argc, char** argv) {
         mm.peer_overhead = 5ull << 28;
         const basalt::program::MgPlan mp = basalt::program::plan_multi_gpu(chosen_cards, mm);
         basalt::log::info("basalt", "%s", mp.line.c_str());
-        if (mp.pick == basalt::program::Mechanism::LayerSplit && o.peer_device >= 1) {
-            o.layer_split = "auto";
+        // Two GPUs default to a layer split: each card decodes the layers it holds, so a resident expert is
+        // not copied across the x8 link. --layer-split off keeps the expert tier. An explicit K or auto wins
+        // over the unlike-card planner, which otherwise never picks the split.
+        const bool split_off = o.layer_split_given && o.layer_split.empty();
+        const bool split_default = !o.layer_split_given && chosen_cards.size() >= 2;
+        if (!split_off && (o.layer_split_given || split_default ||
+                           (mp.pick == basalt::program::Mechanism::LayerSplit && o.peer_device >= 1))) {
+            if (o.layer_split.empty()) o.layer_split = "auto";
             o.peer_devices.clear();
             o.peer_device = -1;
         }
@@ -77,6 +83,11 @@ int run(int argc, char** argv) {
     // the peer card takes expert rows of a long prompt chunk only when it is as fast as the main one: a slower card costs the
     // chunk more than the experts it saves the main card's link, so it keeps to the short chunks it helps
     const bool peer_streamed_share = chosen_cards.size() >= 2 && basalt::program::cards_alike(chosen_cards[0], chosen_cards[1]);
+    if (o.peer_device >= 1 && chosen_cards.size() >= 2) {
+        const double main_bw = chosen_cards[0].mem_gbps;
+        const double peer_bw = chosen_cards[1].mem_gbps;
+        o.fast_peer = main_bw <= 0.0 || peer_bw >= 0.9 * main_bw;
+    }
     // the prompt-time layer split over the expert tier cards (PromptStage), and the most stages it may use, the main
     // card's included: every card on two cards or on three or more alike ones, none on three or more unlike cards
     // until measured on such a set.  With --batch a read splits only while no slot decodes.
@@ -278,6 +289,20 @@ int run(int argc, char** argv) {
     // slower link it must shrink or the window waits for it.  The real H2D bandwidth is probed once; from 20 GB/s up
     // the default stays.
     double main_link_gbps = 0;   // the probed host->device bandwidth (the prompt-time split's price reads it)
+    // Layer split: the two x8 hops share one root port, so the share is sized from both copying at once and then
+    // applied to each card's own layers. Each hop moves about what one card's 0.20 does today; the pair covers
+    // the combined-link share. A set --pcie-frac is left as given.
+    if (o.pcie_frac < 0.0 && chosen_cards.size() >= 2 && !o.layer_split.empty()) {
+        std::vector<int> devs;
+        for (int i = 0; i < (int) chosen_cards.size(); ++i) devs.push_back(i);
+        const double together = probe_h2d_together_gbps(devs);
+        if (together > 0.0) {
+            o.pcie_frac = pcie_frac_for_gbps(together, 0.55);
+            main_link_gbps = together / (double) devs.size();
+            basalt::log::info("basalt generate", "PCIe probe: both cards %.1f GB/s together -> pcie_frac %.2f on "
+                                 "each card's own layers", together, o.pcie_frac);
+        }
+    }
     if (o.pcie_frac < 0.0) {
         const double base = 0.55;
         std::string bursts;
