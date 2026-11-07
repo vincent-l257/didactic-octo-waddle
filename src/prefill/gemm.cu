@@ -2,6 +2,8 @@
 #include "basalt/prefill/gemm.hpp"
 #include "basalt/kernels/dequant_bf16.hpp"
 #include "basalt/kernels/hc_fused.hpp"
+#include "basalt/kernels/cc_launch.hpp"
+#include <cuda_bf16.h>
 
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
@@ -35,6 +37,61 @@ void note(cublasStatus_t s, const char* what) {
 }
 
 
+// Y[t][n] = sum_k X[t][k] W[n][k] (+ beta Y) in FP32 for a cc 7.0 card, which this cuBLAS has no kernels for:
+// 64 x 64 tiles, 256 threads of 4 x 4 outputs, K in steps of 16.
+template <class T> __device__ __forceinline__ float to_f(T v);
+template <> __device__ __forceinline__ float to_f<__nv_bfloat16>(__nv_bfloat16 v) { return __bfloat162float(v); }
+template <> __device__ __forceinline__ float to_f<__half>(__half v) { return __half2float(v); }
+
+template <class T>
+__global__ void __launch_bounds__(256) gemm_simt_kernel(const T* X, const T* W, float* Y, int nt, int nn, int nk,
+                                                        int ldy, float beta) {
+    __shared__ float xs[16][64 + 1], ws[16][64 + 1];
+    const int t0 = blockIdx.y * 64, n0 = blockIdx.x * 64;
+    const int tx = threadIdx.x % 16, ty = threadIdx.x / 16;
+    float acc[4][4] = {};
+    for (int k0 = 0; k0 < nk; k0 += 16) {
+        for (int i = threadIdx.x; i < 64 * 16; i += 256) {
+            const int r = i / 16, k = i % 16;
+            const bool kin = k0 + k < nk;
+            xs[k][r] = kin && t0 + r < nt ? to_f(X[(size_t) (t0 + r) * nk + k0 + k]) : 0.0f;
+            ws[k][r] = kin && n0 + r < nn ? to_f(W[(size_t) (n0 + r) * nk + k0 + k]) : 0.0f;
+        }
+        __syncthreads();
+#pragma unroll
+        for (int k = 0; k < 16; ++k) {
+            float a[4], b[4];
+#pragma unroll
+            for (int i = 0; i < 4; ++i) { a[i] = xs[k][ty + 16 * i]; b[i] = ws[k][tx + 16 * i]; }
+#pragma unroll
+            for (int i = 0; i < 4; ++i)
+#pragma unroll
+                for (int j = 0; j < 4; ++j) acc[i][j] = fmaf(a[i], b[j], acc[i][j]);
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int t = t0 + ty + 16 * i;
+        if (t >= nt) continue;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int n = n0 + tx + 16 * j;
+            if (n >= nn) continue;
+            float* y = Y + (size_t) t * ldy + n;
+            *y = beta != 0.0f ? acc[i][j] + beta * *y : acc[i][j];
+        }
+    }
+}
+
+template <class T>
+void gemm_simt(const uint16_t* X, const uint16_t* W, float* Y, int64_t T_, int64_t N, int64_t K, int64_t ldy,
+               float beta, void* stream) {
+    const dim3 grid((unsigned) ((N + 63) / 64), (unsigned) ((T_ + 63) / 64));
+    basalt::kernels::launch_cc(gemm_simt_kernel<T>, grid, dim3(256), 0, (cudaStream_t) stream, (const T*) X,
+                               (const T*) W, Y, (int) T_, (int) N, (int) K, (int) ldy, beta);
+}
+
 // One handle made ahead of time per device, taken by the first Gemm that starts there.
 cublasHandle_t g_prepared[16] = {};
 
@@ -43,7 +100,7 @@ cublasHandle_t g_prepared[16] = {};
 bool Gemm::prepare_handle(std::string& err) {
     int dev = 0;
     cudaGetDevice(&dev);
-    if (dev < 0 || dev >= 16 || g_prepared[dev] != nullptr) return true;
+    if (dev < 0 || dev >= 16 || g_prepared[dev] != nullptr || basalt::kernels::sm70_current()) return true;
     if (const cublasStatus_t s = cublasCreate(&g_prepared[dev]); s != CUBLAS_STATUS_SUCCESS) {
         g_prepared[dev] = nullptr;
         err = "prefill gemm: cublasCreate: cuBLAS status " + std::to_string((int) s);
@@ -62,6 +119,14 @@ Gemm::~Gemm() {
 
 bool Gemm::init_external(void* stream, uint16_t* scratch, int64_t scratch_elems, void* workspace, size_t ws_bytes,
                          std::string& err) {
+    if (basalt::kernels::sm70_current()) {   // no handle: the products run gemm_simt
+        stream_ = stream;
+        external_ = true;
+        workspace_ = workspace;
+        scratch_ = scratch;
+        scratch_elems_ = scratch_elems;
+        return true;
+    }
     cublasHandle_t h = nullptr;
     int dev = 0;
     cudaGetDevice(&dev);
@@ -88,27 +153,30 @@ void Gemm::rebind(uint16_t* scratch, int64_t scratch_elems, void* workspace, siz
     scratch_ = scratch;
     scratch_elems_ = scratch_elems;
     workspace_ = workspace;
-    cublasSetWorkspace((cublasHandle_t) handle_, workspace_, ws_bytes);
+    if (handle_) cublasSetWorkspace((cublasHandle_t) handle_, workspace_, ws_bytes);
 }
 
 bool Gemm::init(void* stream, int64_t scratch_elems, std::string& err) {
     // every failure names the call and the real status, so "no VRAM" can be told from a broken install
     cublasHandle_t h = nullptr;
-    if (const cublasStatus_t s = cublasCreate(&h); s != CUBLAS_STATUS_SUCCESS) {
+    const bool simt = basalt::kernels::sm70_current();
+    if (const cublasStatus_t s = simt ? CUBLAS_STATUS_SUCCESS : cublasCreate(&h); s != CUBLAS_STATUS_SUCCESS) {
         err = "prefill gemm: cublasCreate: cuBLAS status " + std::to_string((int) s);
         return false;
     }
     handle_ = h;
     stream_ = stream;
-    note(cublasSetStream(h, (cudaStream_t) stream), "cublasSetStream");
+    if (h) note(cublasSetStream(h, (cudaStream_t) stream), "cublasSetStream");
     // A fixed workspace so the handle never allocates on the way (and graphs could capture it later).
     const size_t ws = 32u << 20;
     if (const cudaError_t e = cudaMalloc(&workspace_, ws); e != cudaSuccess) {
         err = std::string("prefill gemm: workspace of 32 MiB: ") + cudaGetErrorString(e);
         return false;
     }
-    note(cublasSetWorkspace(h, workspace_, ws), "cublasSetWorkspace");
-    note(cublasSetMathMode(h, CUBLAS_DEFAULT_MATH), "cublasSetMathMode");
+    if (h) {
+        note(cublasSetWorkspace(h, workspace_, ws), "cublasSetWorkspace");
+        note(cublasSetMathMode(h, CUBLAS_DEFAULT_MATH), "cublasSetMathMode");
+    }
     if (scratch_elems > 0) {
         if (const cudaError_t e = cudaMalloc((void**) &scratch_, (size_t) scratch_elems * 2); e != cudaSuccess) {
             err = "prefill gemm: dequant scratch of " + std::to_string(scratch_elems * 2 >> 20) + " MiB: " +
@@ -124,6 +192,7 @@ void Gemm::bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64
                 float beta) {
     if (T <= 0 || N <= 0) return;
     if (ldy <= 0) ldy = N;
+    if (!handle_) { gemm_simt<__nv_bfloat16>(X, W, Y, T, N, K, ldy, beta, stream_); return; }
     const float alpha = 1.0f;
     // Column-major view: Y^T[N, T] = W[N, K] (stored K x N col-major, transposed) . X^T[K, T].
     ck(cublasGemmEx((cublasHandle_t) handle_, CUBLAS_OP_T, CUBLAS_OP_N, (int) N, (int) T, (int) K, &alpha, W,
@@ -168,6 +237,7 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
                float beta) {
     if (T <= 0 || N <= 0) return;
     if (ldy <= 0) ldy = N;
+    if (!handle_) { gemm_simt<__half>(X, W, Y, T, N, K, ldy, beta, stream_); return; }
     const float alpha = 1.0f;
     ck(cublasGemmEx((cublasHandle_t) handle_, CUBLAS_OP_T, CUBLAS_OP_N, (int) N, (int) T, (int) K, &alpha, W,
                     CUDA_R_16F, (int) K, X, CUDA_R_16F, (int) K, &beta, Y, CUDA_R_32F, (int) ldy,

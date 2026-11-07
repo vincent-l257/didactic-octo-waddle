@@ -11,6 +11,7 @@
 // beta, and the others read them the same way.  The state and every constant are loaded before the grid
 // dependency wait (the window never writes the state).
 #include "basalt/kernels/dec_gdn.hpp"
+#include "basalt/kernels/sm70_emu.cuh"
 #include "basalt/kernels/pdl.hpp"
 #include "basalt/kernels/verify_kernels.hpp"
 #include "basalt/kernels/q8_1_finite.hpp"
@@ -194,10 +195,16 @@ __device__ __forceinline__ void rec_block(const DecRecArgs& a, int T, int head, 
     for (int i = tid; i < 2 * 32 * NJ; i += S) {   // the alpha/beta rows into shared memory
         const int r = i / (32 * NJ), k = i % (32 * NJ);
         const uint4* src = reinterpret_cast<const uint4*>((r ? a.w_beta : a.w_alpha) + (size_t) gh * a.n_embd) + k;
+#if BASALT_SM80
         asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"((uint32_t) __cvta_generic_to_shared(&sm.wab[r][k])),
                      "l"(src) : "memory");
+#else
+        basalt::v70::copy<16>((uint32_t) __cvta_generic_to_shared(&sm.wab[r][k]), src);
+#endif
     }
+#if BASALT_SM80
     asm volatile("cp.async.commit_group;" ::: "memory");
+#endif
     const float dt = a.dt[gh], sa = a.ssm_a[gh], gam = a.gamma[col];
     stamp(a, 1);
     #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
@@ -210,7 +217,9 @@ __device__ __forceinline__ void rec_block(const DecRecArgs& a, int T, int head, 
     #endif
     // alpha and beta read only the hc output and constants, both complete before this kernel can launch (its
     // predecessor passed its own wait on the hc read), so they are computed while the projections still run
+#if BASALT_SM80
     asm volatile("cp.async.wait_all;" ::: "memory");
+#endif
     rec_sync<SUB>();
     for (int job = rg; job < 2 * T; job += RG) {   // (gate, token) jobs over the four warps
         const int t = job >> 1;

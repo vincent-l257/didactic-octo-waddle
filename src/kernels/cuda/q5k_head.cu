@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -350,9 +351,9 @@ void launch_bpr(const void* w, const void* x, float* y, int n_in, int n_out, cud
         if (smem > smem_set[dev].load(std::memory_order_relaxed)) {
             int sms = 0, per_sm = 0;
             cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
-            opt_in_check(cudaFuncSetAttribute(q5k_head_kernel<NC, BPR>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem),
+            opt_in_check(basalt::kernels::cc_func_set_attribute(q5k_head_kernel<NC, BPR>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem),
                          "q5k_head");
-            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, q5k_head_kernel<NC, BPR>, WPB * WARP, smem);
+            basalt::kernels::cc_occupancy(&per_sm, q5k_head_kernel<NC, BPR>, WPB * WARP, smem);
             grid_max[dev].store((sms > 0 ? sms : 1) * (per_sm > 0 ? per_sm : 1), std::memory_order_relaxed);
             smem_set[dev].store(smem, std::memory_order_release);
         }
@@ -360,7 +361,7 @@ void launch_bpr(const void* w, const void* x, float* y, int n_in, int n_out, cud
     const long long want = ((long long) n_out + WPB - 1) / WPB;
     const long long gm = grid_max[dev].load(std::memory_order_relaxed);
     const unsigned grid = (unsigned) (want < gm ? want : gm);
-    q5k_head_kernel<NC, BPR><<<grid, WPB * WARP, smem, s>>>((const Q5KBlock*) w, (const Q81Block*) x, y, n_in, n_out);
+    basalt::kernels::launch_cc(q5k_head_kernel<NC, BPR>, grid, WPB * WARP, smem, s, (const Q5KBlock*) w, (const Q81Block*) x, y, n_in, n_out);
 }
 template <int NC>
 void launch_nc(const void* w, const void* x, float* y, int n_in, int n_out, cudaStream_t s) {
@@ -386,7 +387,7 @@ bool q5k_head_top1(const void* weights, const void* x_q8_1, float* y, int n_in, 
     if (grid_max[dev] == 0) {
         int sms = 0, per_sm = 0;
         cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, q5k_head_top1_kernel, WPB * WARP, 0);
+        basalt::kernels::cc_occupancy(&per_sm, q5k_head_top1_kernel, WPB * WARP, 0);
         grid_max[dev] = (sms > 0 ? sms : 1) * (per_sm > 0 ? per_sm : 1);
         if (grid_max[dev] > 4096) grid_max[dev] = 4096;
     }
@@ -413,7 +414,7 @@ __global__ void mask_unmapped_kernel(float* __restrict__ y, const int32_t* __res
 
 void q5k_head_mask_unmapped(float* y, const int32_t* map, int n, void* stream) {
     if (n <= 0) return;
-    mask_unmapped_kernel<<<(n + 255) / 256, 256, 0, (cudaStream_t) stream>>>(y, map, n);
+    basalt::kernels::launch_cc(mask_unmapped_kernel, (n + 255) / 256, 256, 0, (cudaStream_t) stream, y, map, n);
 }
 
 void q5k_head_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {
@@ -512,8 +513,7 @@ size_t q5k_proxy_scratch_bytes(int64_t n_cap) { return px::scratch_bytes(n_cap);
 void q5k_proxy_pack(const void* q5k_rows, int64_t row0, int64_t n, void* proxy, int64_t n_cap, void* stream) {
     if (n <= 0) return;
     const int64_t total = n * 80;
-    q5k_proxy_pack_kernel<<<(unsigned) ((total + 127) / 128), 128, 0, (cudaStream_t) stream>>>(
-        (const uint8_t*) q5k_rows, row0, n, (uint4*) proxy, px::scales(proxy, n_cap));
+    basalt::kernels::launch_cc(q5k_proxy_pack_kernel, (unsigned) ((total + 127) / 128), 128, 0, (cudaStream_t) stream, (const uint8_t*) q5k_rows, row0, n, (uint4*) proxy, px::scales(proxy, n_cap));
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "q5k_proxy_pack: %s", cudaGetErrorString(e));

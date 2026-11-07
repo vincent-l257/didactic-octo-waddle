@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 
 #include <stdexcept>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -157,7 +158,7 @@ void cvec_apply(float* R, int64_t layer, int64_t T, int64_t r_ld, const float* b
     const DevTables& t = g_dev[cur_device()];
     if (t.dir == nullptr) throw std::runtime_error("cvec_apply: the control vector is not on this device (cvec_replicate)");
     const dim3 grid((unsigned) g_cvec.hc, (unsigned) T);
-    cvec_kernel<<<grid, THREADS, 0, (cudaStream_t) stream>>>(R, t.dir, t.s, t.on, g_cvec.mode, layer,
+    basalt::kernels::launch_cc(cvec_kernel, grid, THREADS, 0, (cudaStream_t) stream, R, t.dir, t.s, t.on, g_cvec.mode, layer,
                                                             (int) g_cvec.n_embd, (int) g_cvec.hc, r_ld, bo, bo_ld,
                                                             inj, inj_ld, write ? 1 : 0);
     if (cudaPeekAtLastError() != cudaSuccess) throw std::runtime_error("cvec_apply: launch failed");

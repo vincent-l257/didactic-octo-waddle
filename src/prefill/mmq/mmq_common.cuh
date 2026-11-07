@@ -24,9 +24,10 @@
 #define GGML_COMMON_DECL_CUDA
 #define GGML_COMMON_IMPL_CUDA
 #include "basalt/ggml/ggml_common.h"
+#include "basalt/kernels/cc_launch.hpp"
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ != 860 && __CUDA_ARCH__ < 1200
-#error "the MMQ kernels are built for compute capability 8.6 and 12.0"
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ != 700 && __CUDA_ARCH__ != 860 && __CUDA_ARCH__ < 1200
+#error "the MMQ kernels are built for compute capability 7.0, 8.6 and 12.0"
 #endif
 
 #define WARP_SIZE 32
@@ -56,7 +57,7 @@ int ggml_cuda_get_device();
         static bool shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = { false };                         \
         const int   id                                                = ggml_cuda_get_device();            \
         if (!shared_memory_limit_raised[id]) {                                                             \
-            CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes)); \
+            CUDA_CHECK(basalt::kernels::cc_func_set_attribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes)); \
             shared_memory_limit_raised[id] = true;                                                         \
         }                                                                                                  \
     } while (0)

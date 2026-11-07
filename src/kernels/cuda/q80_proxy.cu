@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -164,8 +165,7 @@ void q80_proxy_pack(const void* q80_rows, int64_t row0, int64_t n, void* proxy, 
                     const int32_t* rows) {
     if (n <= 0) return;
     const int64_t total = n * BPR;
-    q80_proxy_pack_kernel<<<(unsigned) ((total + 127) / 128), 128, 0, (cudaStream_t) stream>>>(
-        (const uint8_t*) q80_rows, row0, n, (uint4*) proxy, px::scales(proxy, n_cap), rows);
+    basalt::kernels::launch_cc(q80_proxy_pack_kernel, (unsigned) ((total + 127) / 128), 128, 0, (cudaStream_t) stream, (const uint8_t*) q80_rows, row0, n, (uint4*) proxy, px::scales(proxy, n_cap), rows);
     check("q80_proxy_pack");
 }
 

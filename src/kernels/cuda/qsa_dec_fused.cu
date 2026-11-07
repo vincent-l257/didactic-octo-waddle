@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -296,9 +297,9 @@ void qsa_dec_kv_post(const QsaDecKvPost& a, int n, const QsaShapes& s, const Rop
     const unsigned blocks = kv_blocks + (a.idx_raw != nullptr && a.part != 1 ? 1 : 0);
     if (blocks == 0) return;
     if (ra.rt.cos != nullptr)
-        kv_post_kernel<true><<<blocks, THREADS, 0, (cudaStream_t) stream>>>(a, n, (int) s.n_head_kv, (int) s.page_size, ra);
+        basalt::kernels::launch_cc(kv_post_kernel<true>, blocks, THREADS, 0, (cudaStream_t) stream, a, n, (int) s.n_head_kv, (int) s.page_size, ra);
     else
-        kv_post_kernel<false><<<blocks, THREADS, 0, (cudaStream_t) stream>>>(a, n, (int) s.n_head_kv, (int) s.page_size, ra);
+        basalt::kernels::launch_cc(kv_post_kernel<false>, blocks, THREADS, 0, (cudaStream_t) stream, a, n, (int) s.n_head_kv, (int) s.page_size, ra);
     check("qsa_dec_kv_post");
 }
 
@@ -314,9 +315,9 @@ void qsa_dec_kv_post_seg(const QsaDecKvPost& a, const QsaSegTable& t, int n, con
     const unsigned blocks = kv_blocks + (a.idx_raw != nullptr && a.part != 1 ? (unsigned) t.n_seg : 0u);
     if (blocks == 0) return;
     if (ra.rt.cos != nullptr)
-        kv_post_seg_kernel<true><<<blocks, THREADS, 0, (cudaStream_t) stream>>>(a, t, n, (int) s.n_head_kv, (int) s.page_size, ra);
+        basalt::kernels::launch_cc(kv_post_seg_kernel<true>, blocks, THREADS, 0, (cudaStream_t) stream, a, t, n, (int) s.n_head_kv, (int) s.page_size, ra);
     else
-        kv_post_seg_kernel<false><<<blocks, THREADS, 0, (cudaStream_t) stream>>>(a, t, n, (int) s.n_head_kv, (int) s.page_size, ra);
+        basalt::kernels::launch_cc(kv_post_seg_kernel<false>, blocks, THREADS, 0, (cudaStream_t) stream, a, t, n, (int) s.n_head_kv, (int) s.page_size, ra);
     check("qsa_dec_kv_post_seg");
 }
 
@@ -329,9 +330,9 @@ void qsa_dec_q_post(const QsaDecQPost& a, int n, const QsaShapes& s, const RopeS
     const RopeArgs ra = rope_args(scaling);
     const unsigned blocks = (unsigned) (n * (s.n_head + (a.q_idx != nullptr ? s.idx_n_head : 0)));
     if (ra.rt.cos != nullptr)
-        q_post_kernel<true><<<blocks, THREADS, 0, (cudaStream_t) stream>>>(a, n, (int) s.n_head, (int) s.idx_n_head, ra);
+        basalt::kernels::launch_cc(q_post_kernel<true>, blocks, THREADS, 0, (cudaStream_t) stream, a, n, (int) s.n_head, (int) s.idx_n_head, ra);
     else
-        q_post_kernel<false><<<blocks, THREADS, 0, (cudaStream_t) stream>>>(a, n, (int) s.n_head, (int) s.idx_n_head, ra);
+        basalt::kernels::launch_cc(q_post_kernel<false>, blocks, THREADS, 0, (cudaStream_t) stream, a, n, (int) s.n_head, (int) s.idx_n_head, ra);
     check("qsa_dec_q_post");
 }
 

@@ -1,5 +1,6 @@
 // src/kernels/cuda/fused_gr.cu - see include/basalt/kernels/fused_gr.hpp.
 #include "basalt/kernels/fused_gr.hpp"
+#include "basalt/kernels/sm70_emu.cuh"
 #include "basalt/kernels/bf16_bits.hpp"
 #include "basalt/kernels/pdl.hpp"
 #include "basalt/kernels/verify_kernels.hpp"
@@ -16,6 +17,7 @@
 #include <string>
 #include <vector>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -386,11 +388,21 @@ __global__ void __launch_bounds__(THREADS) gr_norm_split_kernel(GrMulti m) {
 
 __device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
     const unsigned sa = (unsigned) __cvta_generic_to_shared(smem);
+#if BASALT_SM80
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(sa), "l"(gmem) : "memory");
+#else
+    basalt::v70::copy<16>(sa, gmem);
+#endif
 }
+#if BASALT_SM80
 __device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
 __device__ __forceinline__ void cp_async_wait1() { asm volatile("cp.async.wait_group 1;\n" ::: "memory"); }
 __device__ __forceinline__ void cp_async_wait0() { asm volatile("cp.async.wait_group 0;\n" ::: "memory"); }
+#else
+__device__ __forceinline__ void cp_async_commit() {}
+__device__ __forceinline__ void cp_async_wait1() {}
+__device__ __forceinline__ void cp_async_wait0() {}
+#endif
 
 // `dot8` with its 8 activations as two float4: the same eight fmaf in the same order
 __device__ __forceinline__ float dot8v(const uint4 w, const float4 x0, const float4 x1) {
@@ -574,7 +586,7 @@ void launch_staged(int depth, const GrMulti& c, dim3 grid, size_t smem, cudaStre
 // A failed opt-in is fatal on a card that reports one; a card that reports none is sliced by capacity instead.
 template <typename K>
 void gr_opt_in(K kernel, int bytes, int optin) {
-    const cudaError_t e = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+    const cudaError_t e = basalt::kernels::cc_func_set_attribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
     if (optin > 0) opt_in_check(e, "fused_gr");
 }
 
@@ -714,8 +726,8 @@ void fused_gr_read(const FusedGrArgs& a, void* stream) {
     }
     if (hc8_gr_read_multi(&a, 1, N, HC, stream)) return;
     cudaStream_t st = (cudaStream_t) stream;
-    gr_down_kernel<<<DOWN_BLOCKS + 1, THREADS, 0, st>>>(a);
-    gr_up_kernel<<<UP_BLOCKS, THREADS, 0, st>>>(a);
+    basalt::kernels::launch_cc(gr_down_kernel, DOWN_BLOCKS + 1, THREADS, 0, st, a);
+    basalt::kernels::launch_cc(gr_up_kernel, UP_BLOCKS, THREADS, 0, st, a);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "fused_gr_read: %s", cudaGetErrorString(e));

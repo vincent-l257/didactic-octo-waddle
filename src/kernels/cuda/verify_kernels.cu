@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -838,45 +839,44 @@ __global__ void dense_steps_kernel(const int32_t* __restrict__ cells, int n, int
 void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream) {
     if (cap <= 0) return;
     if (blob_bytes % 16 != 0) { basalt::log::error("basalt", "fetch_blobs: blob size must be a multiple of 16"); std::exit(1); }
-    fetch_blobs_kernel<<<48 * 8, 256, 0, (cudaStream_t) stream>>>(src, n, (uint4*) dst, (long long) (blob_bytes / 16));
+    basalt::kernels::launch_cc(fetch_blobs_kernel, 48 * 8, 256, 0, (cudaStream_t) stream, src, n, (uint4*) dst, (long long) (blob_bytes / 16));
     check("fetch_blobs");
 }
 
 void rebase_ptrs(unsigned long long* ptr, const int32_t* n, uint8_t* base, int64_t blob_bytes, void* stream) {
-    rebase_ptrs_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(ptr, n, (unsigned long long) base, (long long) blob_bytes);
+    basalt::kernels::launch_cc(rebase_ptrs_kernel, 1, 128, 0, (cudaStream_t) stream, ptr, n, (unsigned long long) base, (long long) blob_bytes);
     check("rebase_ptrs");
 }
 
 void add_streams_broadcast(const float* h, const float* e, float* R, int64_t n_embd, int hc, int n_tok, void* stream) {
-    add_streams_broadcast_kernel<<<dim3((unsigned) ((n_embd * hc + 255) / 256), (unsigned) n_tok), 256, 0,
-                                   (cudaStream_t) stream>>>(h, e, R, n_embd, hc);
+    basalt::kernels::launch_cc(add_streams_broadcast_kernel, dim3((unsigned) ((n_embd * hc + 255) / 256), (unsigned) n_tok), 256, 0, (cudaStream_t) stream, h, e, R, n_embd, hc);
     check("add_streams_broadcast");
 }
 
 void ident_hits(const int32_t* ids, int n, int32_t* slot, int32_t* dst, int32_t* count, void* stream) {
     if (n < 1 || n > 1024) { basalt::log::error("basalt", "ident_hits: n out of range"); std::exit(1); }
-    ident_hits_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(ids, n, slot, dst, count);
+    basalt::kernels::launch_cc(ident_hits_kernel, 1, 1024, 0, (cudaStream_t) stream, ids, n, slot, dst, count);
     check("ident_hits");
 }
 
 void gather_rows(const uint8_t* src, int64_t row_bytes, const int32_t* ids, int64_t n, uint8_t* dst, void* stream) {
     cudaStream_t s = (cudaStream_t) stream;
     if (row_bytes % 16 == 0)
-        gather_rows_kernel<<<48 * 8, 256, 0, s>>>((const uint4*) src, row_bytes / 16, ids, n, (uint4*) dst);
+        basalt::kernels::launch_cc(gather_rows_kernel<uint4>, 48 * 8, 256, 0, s, (const uint4*) src, row_bytes / 16, ids, n, (uint4*) dst);
     else if (row_bytes % 4 == 0)
-        gather_rows_kernel<<<48 * 8, 256, 0, s>>>((const uint32_t*) src, row_bytes / 4, ids, n, (uint32_t*) dst);
+        basalt::kernels::launch_cc(gather_rows_kernel<uint32_t>, 48 * 8, 256, 0, s, (const uint32_t*) src, row_bytes / 4, ids, n, (uint32_t*) dst);
     else
-        gather_rows_kernel<<<48 * 8, 256, 0, s>>>(src, row_bytes, ids, n, dst);
+        basalt::kernels::launch_cc(gather_rows_kernel<uint8_t>, 48 * 8, 256, 0, s, src, row_bytes, ids, n, dst);
     check("gather_rows");
 }
 
 void map_ids(int32_t* ids, const int32_t* table, int n, void* stream) {
-    map_ids_kernel<<<1, 64, 0, (cudaStream_t) stream>>>(ids, table, n);
+    basalt::kernels::launch_cc(map_ids_kernel, 1, 64, 0, (cudaStream_t) stream, ids, table, n);
     check("map_ids");
 }
 
 void row_top_prob(const float* logits, int n_rows, int n_vocab, const int32_t* ids, float* probs, void* stream) {
-    row_top_prob_kernel<<<n_rows, 1024, 0, (cudaStream_t) stream>>>(logits, n_vocab, ids, probs);
+    basalt::kernels::launch_cc(row_top_prob_kernel, n_rows, 1024, 0, (cudaStream_t) stream, logits, n_vocab, ids, probs);
     check("row_top_prob");
 }
 
@@ -898,7 +898,7 @@ void mtp_take_row(float* R, int64_t R_stride, float* inj, int64_t inj_stride, fl
                   const int32_t* row_dev, void* stream) {
     const long long total = (long long) (R_stride + inj_stride + mixed_stride);
     const unsigned blocks = (unsigned) ((total + 255) / 256 < 64 ? (total + 255) / 256 : 64);
-    mtp_take_row_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>(R, (long long) R_stride, inj, (long long) inj_stride,
+    basalt::kernels::launch_cc(mtp_take_row_kernel, blocks, 256, 0, (cudaStream_t) stream, R, (long long) R_stride, inj, (long long) inj_stride,
                                                                    mixed, (long long) mixed_stride, row_dev);
     check("mtp_take_row");
 }
@@ -925,7 +925,7 @@ bool mtp_draft_cond(const unsigned long long* h, int n, const float* probs, cons
     if (n < 1 || n > 16) { basalt::log::error("basalt", "mtp_draft_cond: n out of range"); std::exit(1); }
     CondHandles hs{};
     for (int k = 0; k < n; ++k) hs.h[k] = h[k];
-    mtp_draft_cond_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(hs, n, probs, row, th_bits, hist, j);
+    basalt::kernels::launch_cc(mtp_draft_cond_kernel, 1, 1, 0, (cudaStream_t) stream, hs, n, probs, row, th_bits, hist, j);
     check("mtp_draft_cond");
     return true;
 }
@@ -969,7 +969,7 @@ void mtp_stage(const MtpStageSeg* segs, int n_segs, float* f_dst, const float* f
     a.fsrc = (const volatile float4*) f_src;
     a.n4 = n_f / 4;
     const int fb = n_f > 0 ? (int) std::min<long long>((a.n4 + 255) / 256, 30) : 0;
-    mtp_stage_kernel<<<n_segs + fb, 256, 0, (cudaStream_t) stream>>>(a);
+    basalt::kernels::launch_cc(mtp_stage_kernel, n_segs + fb, 256, 0, (cudaStream_t) stream, a);
     check("mtp_stage");
 }
 
@@ -1008,7 +1008,7 @@ bool mtp_step_end(const int32_t* ids, const int32_t* row_dev, int32_t* tok_dst, 
     if (n > 16) { basalt::log::error("basalt", "mtp_step_end: n out of range"); std::exit(1); }
     StepEndCond hs{};
     for (int k = 0; k < n; ++k) hs.h[k] = h[k];
-    mtp_step_end_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(ids, row_dev, tok_dst, out, j, probs, out_p, hs, n, th_bits,
+    basalt::kernels::launch_cc(mtp_step_end_kernel, 1, 1, 0, (cudaStream_t) stream, ids, row_dev, tok_dst, out, j, probs, out_p, hs, n, th_bits,
                                                             hist);
     check("mtp_step_end");
     return true;
@@ -1029,12 +1029,12 @@ __global__ void window_ids_kernel(int32_t* steps, int window, int32_t* ids, long
 }  // namespace
 
 void window_ids(int32_t* steps, int n, int window, int32_t* ids, int64_t ids_stride, void* stream) {
-    window_ids_kernel<<<dim3(8, (unsigned) n), 256, 0, (cudaStream_t) stream>>>(steps, window, ids, (long long) ids_stride);
+    basalt::kernels::launch_cc(window_ids_kernel, dim3(8, (unsigned) n), 256, 0, (cudaStream_t) stream, steps, window, ids, (long long) ids_stride);
     check("window_ids");
 }
 
 void dense_steps(const int32_t* cells, int n, int32_t* steps, void* stream) {
-    dense_steps_kernel<<<1, 64, 0, (cudaStream_t) stream>>>(cells, n, steps);
+    basalt::kernels::launch_cc(dense_steps_kernel, 1, 64, 0, (cudaStream_t) stream, cells, n, steps);
     check("dense_steps");
 }
 
@@ -1075,37 +1075,33 @@ void gdn_step_norm_seg(const SegRow* rows, size_t state_off, const float* h, int
 void gdn_commit_layers_seg(const GdnCommitSeg& a, void* stream, int blocks) {
     if (a.n_layers <= 0 || a.n_rows <= 0) return;
     const int conv_blocks = (a.C + 32 * RG - 1) / (32 * RG);
-    gdn_commit_layers_seg_kernel<<<dim3((unsigned) (blocks > 0 ? blocks : 1), (unsigned) a.n_rows), dim3(32, RG), 0,
-                                   (cudaStream_t) stream>>>(a, conv_blocks);
+    basalt::kernels::launch_cc(gdn_commit_layers_seg_kernel, dim3((unsigned) (blocks > 0 ? blocks : 1), (unsigned) a.n_rows), dim3(32, RG), 0, (cudaStream_t) stream, a, conv_blocks);
     check("gdn_commit_layers_seg");
 }
 
 void gdn_commit_begin(CommitCtl* ctl, const int32_t* epoch, uint32_t* begun, void* stream) {
-    gdn_commit_begin_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(ctl, epoch, begun);
+    basalt::kernels::launch_cc(gdn_commit_begin_kernel, 1, 1, 0, (cudaStream_t) stream, ctl, epoch, begun);
     check("gdn_commit_begin");
 }
 
 void gdn_commit_layers_dyn(const GdnCommitLayers& a, CommitCtl* ctl, void* stream, int blocks) {
     if (a.n_layers <= 0) return;
     const int conv_blocks = (a.C + 32 * RG - 1) / (32 * RG);
-    gdn_commit_layers_dyn_kernel<<<(unsigned) (blocks > 0 ? blocks : 1), dim3(32, RG), 0, (cudaStream_t) stream>>>(
-        a, conv_blocks, ctl);
+    basalt::kernels::launch_cc(gdn_commit_layers_dyn_kernel, (unsigned) (blocks > 0 ? blocks : 1), dim3(32, RG), 0, (cudaStream_t) stream, a, conv_blocks, ctl);
     check("gdn_commit_layers_dyn");
 }
 
 void gdn_commit_finish(const GdnCommitLayers& a, CommitCtl* ctl, void* stream, int blocks) {
     if (a.n_layers <= 0) return;
     const int conv_blocks = (a.C + 32 * RG - 1) / (32 * RG);
-    gdn_commit_finish_kernel<<<(unsigned) (blocks > 0 ? blocks : 1), dim3(32, RG), 0, (cudaStream_t) stream>>>(
-        a, conv_blocks, ctl, wait_abort_device_word());
+    basalt::kernels::launch_cc(gdn_commit_finish_kernel, (unsigned) (blocks > 0 ? blocks : 1), dim3(32, RG), 0, (cudaStream_t) stream, a, conv_blocks, ctl, wait_abort_device_word());
     check("gdn_commit_finish");
 }
 
 void gdn_commit_layers(const GdnCommitLayers& a, void* stream, int blocks) {
     if (a.n_layers <= 0) return;
     const int conv_blocks = (a.C + 32 * RG - 1) / (32 * RG);
-    gdn_commit_layers_pipe_kernel<<<(unsigned) (blocks > 0 ? blocks : 1), dim3(32, RG), 0, (cudaStream_t) stream>>>(
-        a, conv_blocks);
+    basalt::kernels::launch_cc(gdn_commit_layers_pipe_kernel, (unsigned) (blocks > 0 ? blocks : 1), dim3(32, RG), 0, (cudaStream_t) stream, a, conv_blocks);
     check("gdn_commit_layers");
 }
 
@@ -1113,8 +1109,7 @@ void gdn_commit_lazy(const GdnCommitLayers& a, CommitCtl* ctl, int must_layers, 
                      uint32_t stop_value, void* stream, int blocks, const GdnLazyPf* pf) {
     if (a.n_layers <= 0) return;
     const int conv_blocks = (a.C + 32 * RG - 1) / (32 * RG);
-    gdn_commit_lazy_kernel<<<(unsigned) (blocks > 0 ? blocks : 1), dim3(32, RG), 0, (cudaStream_t) stream>>>(
-        a, conv_blocks, ctl, must_layers, stop, stop_value, pf != nullptr ? *pf : GdnLazyPf{});
+    basalt::kernels::launch_cc(gdn_commit_lazy_kernel, (unsigned) (blocks > 0 ? blocks : 1), dim3(32, RG), 0, (cudaStream_t) stream, a, conv_blocks, ctl, must_layers, stop, stop_value, pf != nullptr ? *pf : GdnLazyPf{});
     check("gdn_commit_lazy");
 }
 
@@ -1124,7 +1119,7 @@ bool gdn_commit_lazy_none(CommitCtl* ctl) {
 }
 
 void gdn_conv_commit(float* history, const float* qkv, int channels, const int32_t* n_keep, void* stream) {
-    gdn_conv_commit_kernel<<<(unsigned) ((channels + 255) / 256), 256, 0, (cudaStream_t) stream>>>(history, qkv,
+    basalt::kernels::launch_cc(gdn_conv_commit_kernel, (unsigned) ((channels + 255) / 256), 256, 0, (cudaStream_t) stream, history, qkv,
                                                                                                  channels, n_keep);
     check("gdn_conv_commit");
 }
@@ -1165,8 +1160,7 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
         std::exit(1);
     }
     if (n_keep != nullptr && t_out_begin >= n_tok) {
-        gdn_step_commit_kernel<<<dim3((unsigned) h_v, 4u), dim3(32, RG), 0, (cudaStream_t) stream>>>(
-            state, h, conv_channels, gate, beta, h_k, h_v, n_keep);
+        basalt::kernels::launch_cc(gdn_step_commit_kernel, dim3((unsigned) h_v, 4u), dim3(32, RG), 0, (cudaStream_t) stream, state, h, conv_channels, gate, beta, h_k, h_v, n_keep);
     } else {
         launch_pdl(gdn_step_norm_multi_kernel, dim3((unsigned) h_v), dim3(S, RG), 0, (cudaStream_t) stream,
                    state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin);
@@ -1342,7 +1336,7 @@ __global__ void __launch_bounds__(kResidentPlanMax) route_tail_skip_kernel(int32
 void route_tail_skip(int32_t* ids, float* weights, const ResidentTabs& held, int n_entries, int k, int rank, int n_expert,
                      unsigned long long* counts, void* stream) {
     if (rank < 1 || rank >= k || n_entries < 1 || n_entries > kResidentPlanMax || k < 1) return;
-    route_tail_skip_kernel<<<1, kResidentPlanMax, 0, (cudaStream_t) stream>>>(ids, weights, held, n_entries, k, rank,
+    basalt::kernels::launch_cc(route_tail_skip_kernel, 1, kResidentPlanMax, 0, (cudaStream_t) stream, ids, weights, held, n_entries, k, rank,
                                                                               n_expert, counts);
     check("route_tail_skip");
 }
@@ -1350,18 +1344,18 @@ void route_tail_skip(int32_t* ids, float* weights, const ResidentTabs& held, int
 void resident_plan(const int32_t* ids, int n_entries, int k, const int32_t* res_layer, int n_expert,
                    const uint8_t* cache_base, const unsigned long long* slot_off, long long blob, int32_t* plan,
                    long long capx, uint32_t* skip, uint32_t ring, void* stream, uint32_t* plan_err) {
-    resident_plan_kernel<<<1, kResidentPlanMax, 0, (cudaStream_t) stream>>>(ids, n_entries, k, res_layer, n_expert, cache_base, slot_off,
+    basalt::kernels::launch_cc(resident_plan_kernel, 1, kResidentPlanMax, 0, (cudaStream_t) stream, ids, n_entries, k, res_layer, n_expert, cache_base, slot_off,
                                                               blob, plan, capx, skip, ring, plan_err);
     check("resident_plan");
 }
 void wait_flag_ge_or(const uint32_t* flag, uint32_t value, const uint32_t* skip, void* stream) {
-    wait_flag_ge_or_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value, skip);
+    basalt::kernels::launch_cc(wait_flag_ge_or_kernel, 1, 1, 0, (cudaStream_t) stream, flag, value, skip);
     check("wait_flag_ge_or");
 }
 void copy_i32_from_mapped_unless(int32_t* dst, const int32_t* src, long long n, const uint32_t* skip, uint32_t value,
                                  void* stream) {
     if (n <= 0) return;
-    copy_i32_unless_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(dst, (const volatile int32_t*) src, (int) n, skip, value);
+    basalt::kernels::launch_cc(copy_i32_unless_kernel, 1, 128, 0, (cudaStream_t) stream, dst, (const volatile int32_t*) src, (int) n, skip, value);
     check("copy_i32_from_mapped_unless");
 }
 void copy_or_zero_from_mapped(float* dst, const float* src, long long n, const uint32_t* skip, uint32_t value,
@@ -1369,13 +1363,13 @@ void copy_or_zero_from_mapped(float* dst, const float* src, long long n, const u
     if (n <= 0) return;
     const long long n4 = n / 4;
     const int blocks = (int) ((n4 + 255) / 256 < 64 ? (n4 + 255) / 256 : 64);
-    copy_or_zero_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>((float4*) dst, (const volatile float4*) src, n4, skip,
+    basalt::kernels::launch_cc(copy_or_zero_kernel, blocks, 256, 0, (cudaStream_t) stream, (float4*) dst, (const volatile float4*) src, n4, skip,
                                                                     value);
     check("copy_or_zero_from_mapped");
 }
 
 void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream) {
-    wait_flag_ge_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value);
+    basalt::kernels::launch_cc(wait_flag_ge_kernel, 1, 1, 0, (cudaStream_t) stream, flag, value);
     check("wait_flag_ge");
 }
 
@@ -1396,45 +1390,43 @@ __global__ void word_copy_list_kernel(WordCopyList l) {
 
 void word_copy_list(const WordCopyList& l, void* stream) {
     if (l.n <= 0) return;
-    word_copy_list_kernel<<<l.n, 128, 0, (cudaStream_t) stream>>>(l);
+    basalt::kernels::launch_cc(word_copy_list_kernel, l.n, 128, 0, (cudaStream_t) stream, l);
     check("word_copy_list");
 }
 
 void signal_flag(uint32_t* flag, uint32_t value, void* stream) {
-    signal_flag_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value);
+    basalt::kernels::launch_cc(signal_flag_kernel, 1, 1, 0, (cudaStream_t) stream, flag, value);
     check("signal_flag");
 }
 
 void embedding_gather_dev(const uint8_t* codes, const float* scales, const float* offsets, const int32_t* tokens,
                           int n_tok, int64_t n, int code_bits, int code_bias, int group_elems, uint64_t row_codes,
                           uint64_t row_groups, float* out, void* stream) {
-    embedding_gather_dev_kernel<<<dim3((unsigned) ((n + 255) / 256), (unsigned) n_tok), 256, 0,
-                                  (cudaStream_t) stream>>>(codes, scales, offsets, tokens, n, code_bits, code_bias,
+    basalt::kernels::launch_cc(embedding_gather_dev_kernel, dim3((unsigned) ((n + 255) / 256), (unsigned) n_tok), 256, 0, (cudaStream_t) stream, codes, scales, offsets, tokens, n, code_bits, code_bias,
                                                            group_elems, row_codes, row_groups, out);
     check("embedding_gather_dev");
 }
 
 void broadcast_streams(const float* x, float* R, int64_t n_embd, int hc, int n_tok, void* stream) {
-    broadcast_streams_kernel<<<dim3((unsigned) ((n_embd * hc + 255) / 256), (unsigned) n_tok), 256, 0,
-                               (cudaStream_t) stream>>>(x, R, n_embd, hc);
+    basalt::kernels::launch_cc(broadcast_streams_kernel, dim3((unsigned) ((n_embd * hc + 255) / 256), (unsigned) n_tok), 256, 0, (cudaStream_t) stream, x, R, n_embd, hc);
     check("broadcast_streams");
 }
 
 void copy_indexed(float* dst, const float* src, int64_t stride, const int32_t* index, int64_t n, void* stream) {
     const unsigned blocks = (unsigned) ((n + 255) / 256 < 64 ? (n + 255) / 256 : 64);
-    copy_indexed_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>(dst, src, stride, index, n);
+    basalt::kernels::launch_cc(copy_indexed_kernel, blocks, 256, 0, (cudaStream_t) stream, dst, src, stride, index, n);
     check("copy_indexed");
 }
 
 void ple_hist_gather(float* work, float* const* slots, const SegRow* rows, int64_t n, int n_rows, void* stream) {
     const unsigned blocks = (unsigned) ((n + 255) / 256 < 64 ? (n + 255) / 256 : 64);
-    ple_hist_seg_kernel<<<dim3(blocks, (unsigned) n_rows), 256, 0, (cudaStream_t) stream>>>(work, slots, rows, n, 0);
+    basalt::kernels::launch_cc(ple_hist_seg_kernel, dim3(blocks, (unsigned) n_rows), 256, 0, (cudaStream_t) stream, work, slots, rows, n, 0);
     check("ple_hist_gather");
 }
 
 void ple_hist_scatter(float* const* slots, const float* work, const SegRow* rows, int64_t n, int n_rows, void* stream) {
     const unsigned blocks = (unsigned) ((n + 255) / 256 < 64 ? (n + 255) / 256 : 64);
-    ple_hist_seg_kernel<<<dim3(blocks, (unsigned) n_rows), 256, 0, (cudaStream_t) stream>>>((float*) work, slots, rows, n, 1);
+    basalt::kernels::launch_cc(ple_hist_seg_kernel, dim3(blocks, (unsigned) n_rows), 256, 0, (cudaStream_t) stream, (float*) work, slots, rows, n, 1);
     check("ple_hist_scatter");
 }
 
@@ -1445,7 +1437,7 @@ namespace { __global__ void gpu_stamp_kernel(unsigned long long* buf, int i) {
     buf[i] = t;
 } }
 void gpu_stamp(unsigned long long* buf, int i, void* stream) {
-    gpu_stamp_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(buf, i);
+    basalt::kernels::launch_cc(gpu_stamp_kernel, 1, 1, 0, (cudaStream_t) stream, buf, i);
 }
 
 }  // namespace basalt::kernels

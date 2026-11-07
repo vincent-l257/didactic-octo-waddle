@@ -30,6 +30,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -352,11 +353,11 @@ void native_ple_postops(const float* projected_key, const float* hidden,
     native_gr_rms_norm_weighted(projected_key,w.norm_key,b.key,N,H,NG_RMS_EPS,stream);
     native_gr_rms_norm_weighted(hidden,w.norm_query,b.query,N,H,NG_RMS_EPS,stream);
     auto st = static_cast<cudaStream_t>(stream);
-    gate_kernel<<<H,512,0,st>>>(b.key,b.query,b.gate,1.0f / std::sqrt(float(N)));
-    broadcast_kernel<<<D/256,256,0,st>>>(value,b.gate,b.gated);
+    basalt::kernels::launch_cc(gate_kernel, H, 512, 0, st, b.key,b.query,b.gate,1.0f / std::sqrt(float(N)));
+    basalt::kernels::launch_cc(broadcast_kernel, D/256, 256, 0, st, value,b.gate,b.gated);
     launch_check();
     native_gr_rms_norm_weighted(b.gated,w.norm_conv,b.normalized,N,H,NG_RMS_EPS,stream);
-    conv_residual_kernel<<<D/256,256,0,st>>>(history,b.normalized,w.conv1d_f16,hidden,b.gated,b.conv,b.result);
+    basalt::kernels::launch_cc(conv_residual_kernel, D/256, 256, 0, st, history,b.normalized,w.conv1d_f16,hidden,b.gated,b.conv,b.result);
     launch_check();
 }
 
@@ -370,12 +371,12 @@ void native_ple_window(const PleWindowArgs& a, const PleWeights& w, void* stream
     r.norm_key = w.norm_key; r.norm_query = w.norm_query; r.norm_conv = w.norm_conv;
     r.gated = a.scratch; r.normalized = a.scratch + size_t(a.T) * D;
     r.n_cols = N; r.epsilon = NG_RMS_EPS; r.inv_hc = 1.0f / float(H); r.gate_scale = 1.0f / std::sqrt(float(N));
-    ple_win_rows_kernel<<<dim3(H, unsigned(a.T)), 1024, 0, st>>>(r);
+    basalt::kernels::launch_cc(ple_win_rows_kernel, dim3(H, unsigned(a.T)), 1024, 0, st, r);
     if (a.segs)
-        ple_win_conv_seg_kernel<<<dim3(D / 128, unsigned(a.T)), 128, 0, st>>>(a.R, r.gated, r.normalized, w.conv1d_f16,
+        basalt::kernels::launch_cc(ple_win_conv_seg_kernel, dim3(D / 128, unsigned(a.T)), 128, 0, st, a.R, r.gated, r.normalized, w.conv1d_f16,
                                                                               a.history, a.hist_snap, a.segs);
     else
-        ple_win_conv_kernel<<<D / 128, 128, 0, st>>>(a.R, r.gated, r.normalized, w.conv1d_f16, a.history, a.hist_snap, a.T);
+        basalt::kernels::launch_cc(ple_win_conv_kernel, D / 128, 128, 0, st, a.R, r.gated, r.normalized, w.conv1d_f16, a.history, a.hist_snap, a.T);
     launch_check();
 }
 
@@ -386,13 +387,13 @@ void native_ple_postops_batch(float* key, float* hidden, const float* value, flo
     auto st = static_cast<cudaStream_t>(stream);
     const unsigned rows = unsigned(T) * H;
     const unsigned blocks = unsigned((size_t(T) * D + 255) / 256);
-    rms_rep_kernel<<<rows, 1024, 0, st>>>(key, w.norm_key, key);
-    rms_rep_kernel<<<rows, 1024, 0, st>>>(hidden, w.norm_query, query_norm);
-    gate_kernel<<<rows, 512, 0, st>>>(key, query_norm, gate, 1.0f / std::sqrt(float(N)));
-    broadcast_batch_kernel<<<blocks, 256, 0, st>>>(value, gate, gated, T);
-    rms_rep_kernel<<<rows, 1024, 0, st>>>(gated, w.norm_conv, query_norm);
-    conv_residual_batch_kernel<<<blocks, 256, 0, st>>>(history, query_norm, w.conv1d_f16, hidden, gated, T);
-    history_batch_kernel<<<D / 256, 256, 0, st>>>(history, query_norm, T);
+    basalt::kernels::launch_cc(rms_rep_kernel, rows, 1024, 0, st, key, w.norm_key, key);
+    basalt::kernels::launch_cc(rms_rep_kernel, rows, 1024, 0, st, hidden, w.norm_query, query_norm);
+    basalt::kernels::launch_cc(gate_kernel, rows, 512, 0, st, key, query_norm, gate, 1.0f / std::sqrt(float(N)));
+    basalt::kernels::launch_cc(broadcast_batch_kernel, blocks, 256, 0, st, value, gate, gated, T);
+    basalt::kernels::launch_cc(rms_rep_kernel, rows, 1024, 0, st, gated, w.norm_conv, query_norm);
+    basalt::kernels::launch_cc(conv_residual_batch_kernel, blocks, 256, 0, st, history, query_norm, w.conv1d_f16, hidden, gated, T);
+    basalt::kernels::launch_cc(history_batch_kernel, D / 256, 256, 0, st, history, query_norm, T);
     launch_check();
 }
 } // namespace basalt::kernels

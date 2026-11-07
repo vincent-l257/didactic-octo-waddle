@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 
@@ -123,7 +124,7 @@ void rope_neox_apply(const float* x, float* out, int64_t rows, int head_dim, int
     }
     const int threads = 128;
     const unsigned grid = (unsigned) ((rows + threads - 1) / threads);
-    rope_neox_kernel<<<grid, threads, 0, (cudaStream_t) stream>>>(x, out, rows, head_dim, n_rot, cos_tab,
+    basalt::kernels::launch_cc(rope_neox_kernel, grid, threads, 0, (cudaStream_t) stream, x, out, rows, head_dim, n_rot, cos_tab,
                                                                  sin_tab, pos, mrope_table());
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {

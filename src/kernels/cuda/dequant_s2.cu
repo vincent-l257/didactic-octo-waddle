@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -41,7 +42,7 @@ void dequant_s2(const uint8_t* codes, const float* scales, float* out, int64_t n
     if (n_blocks <= 0) return;
     const int threads = 256;
     const long long blocks = (n_blocks + threads - 1) / threads;
-    dequant_s2_kernel<<<(unsigned) blocks, threads>>>(codes, scales, out, n_blocks);
+    basalt::kernels::launch_cc(dequant_s2_kernel, (unsigned) blocks, threads, 0, 0, codes, scales, out, n_blocks);
     const cudaError_t e = cudaDeviceSynchronize();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "dequant_s2: %s", cudaGetErrorString(e));

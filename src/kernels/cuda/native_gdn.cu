@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -110,8 +111,7 @@ void native_gdn_step(float* state, const float* q, const float* k, const float* 
             throw std::invalid_argument("native GDN requires aligned input spans disjoint from state and output");
     }
     const float scale = 1.0f / sqrtf(float(S));
-    step<<<dim3(unsigned(shape.h_v), 1, S / 4), dim3(32, 4), 0, static_cast<cudaStream_t>(stream)>>>(
-        state, q, k, v, gate, beta, output, int(shape.h_k), int(shape.h_v), scale);
+    basalt::kernels::launch_cc(step, dim3(unsigned(shape.h_v), 1, S / 4), dim3(32, 4), 0, static_cast<cudaStream_t>(stream), state, q, k, v, gate, beta, output, int(shape.h_k), int(shape.h_v), scale);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }

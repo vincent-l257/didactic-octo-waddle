@@ -2,6 +2,7 @@
 // dec_moe.cuh: it runs that file's gate/up items (gu2::pair), SwiGLU (dm_swiglu_q8) and down items (dm_down_item).
 #include "basalt/kernels/pk_moe.hpp"
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -215,7 +216,7 @@ int pk_moe_blocks() {
     if (b[dev] == 0) {
         int sms = 0, per = 0;
         if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
-            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, pk_moe_kernel<TG, TD>, 256, 0) != cudaSuccess) {
+            basalt::kernels::cc_occupancy(&per, pk_moe_kernel<TG, TD>, 256, 0) != cudaSuccess) {
             cudaGetLastError();
             return 0;
         }
@@ -274,7 +275,7 @@ void pk_moe_experts(const NativeExpertLayout& L, const PkMoeArgs& a, void* scrat
 }
 
 void pk_moe_shared_done(unsigned int* sync, void* stream) {
-    pk_shared_done_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(sync);
+    basalt::kernels::launch_cc(pk_shared_done_kernel, 1, 1, 0, (cudaStream_t) stream, sync);
     check("pk_moe_shared_done");
 }
 

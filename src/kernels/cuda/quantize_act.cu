@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -205,7 +206,7 @@ void quantize_q8_0(const float* x, uint8_t* blocks, int64_t n, void* stream) {
     const long long nb = n / QK8_0;
     const int threads = 128;
     const unsigned grid = (unsigned) ((nb + threads - 1) / threads);
-    quantize_q8_0_kernel<<<grid, threads, 0, (cudaStream_t) stream>>>(x, blocks, nb);
+    basalt::kernels::launch_cc(quantize_q8_0_kernel, grid, threads, 0, (cudaStream_t) stream, x, blocks, nb);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "quantize_q8_0 launch: %s", cudaGetErrorString(e));
@@ -229,7 +230,7 @@ void quantize_q8_0_scaled(const float* x, uint8_t* blocks, float* scales, int64_
     }
     const long long nb = n / QK8_0;
     const unsigned grid = (unsigned) ((nb * 32 + 255) / 256);   // a warp per block
-    quantize_q8_0_scaled_warp_kernel<<<grid, 256, 0, (cudaStream_t) stream>>>(x, blocks, scales, nb);
+    basalt::kernels::launch_cc(quantize_q8_0_scaled_warp_kernel, grid, 256, 0, (cudaStream_t) stream, x, blocks, scales, nb);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "quantize_q8_0_scaled launch: %s", cudaGetErrorString(e));
@@ -243,7 +244,7 @@ void dequant_q8_0(const uint8_t* blocks, float* x, int64_t n, void* stream) {
     const long long nb = n / QK8_0;
     const int threads = 128;
     const unsigned grid = (unsigned) ((nb + threads - 1) / threads);
-    dequant_q8_0_kernel<<<grid, threads, 0, (cudaStream_t) stream>>>(blocks, x, nb);
+    basalt::kernels::launch_cc(dequant_q8_0_kernel, grid, threads, 0, (cudaStream_t) stream, blocks, x, nb);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "dequant_q8_0 launch: %s", cudaGetErrorString(e));
@@ -261,7 +262,7 @@ void quantize_q8_K(const float* x, uint8_t* blocks, int64_t n, void* stream) {
     const long long nb = n / QK_K;
     const int threads = 64;                       // one block per thread, and a block is 256 elements
     const unsigned grid = (unsigned) ((nb + threads - 1) / threads);
-    quantize_q8_K_kernel<<<grid, threads, 0, (cudaStream_t) stream>>>(x, blocks, nb);
+    basalt::kernels::launch_cc(quantize_q8_K_kernel, grid, threads, 0, (cudaStream_t) stream, x, blocks, nb);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "quantize_q8_K launch: %s", cudaGetErrorString(e));
@@ -275,7 +276,7 @@ void dequant_q8_K(const uint8_t* blocks, float* x, int64_t n, void* stream) {
     const long long nb = n / QK_K;
     const int threads = 64;
     const unsigned grid = (unsigned) ((nb + threads - 1) / threads);
-    dequant_q8_K_kernel<<<grid, threads, 0, (cudaStream_t) stream>>>(blocks, x, nb);
+    basalt::kernels::launch_cc(dequant_q8_K_kernel, grid, threads, 0, (cudaStream_t) stream, blocks, x, nb);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "dequant_q8_K launch: %s", cudaGetErrorString(e));

@@ -4,6 +4,7 @@
 // ggml/src/ggml-cuda/quantize.cu.  Copyright (c) 2023-2026 The ggml authors.  MIT licence: see THIRD_PARTY_LICENSES.
 #include "quantize.cuh"
 #include <cstdint>
+#include "basalt/kernels/cc_launch.hpp"
 
 // One thread quantizes 4 consecutive floats; the 8 threads of a 32-value block share one scale (and, for DS4, the
 // sum of its rounded values times the scale).  Row i of the output is row ids[i] of the input (row i without `ids`).
@@ -96,12 +97,10 @@ void quantize_mmq_q8_1_cuda(
     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
     switch (mmq_get_q8_1_ds_layout(type_x)) {
         case MMQ_Q8_1_DS_LAYOUT_D4:
-            quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4><<<num_blocks, block_size, 0, stream>>>(
-                x, ids, vy, ne00, s01, s02, s03, ne0, ne1, ne2);
+            basalt::kernels::launch_cc(quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4>, num_blocks, block_size, 0, stream, x, ids, vy, ne00, s01, s02, s03, ne0, ne1, ne2);
             break;
         case MMQ_Q8_1_DS_LAYOUT_DS4:
-            quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_DS4><<<num_blocks, block_size, 0, stream>>>(
-                x, ids, vy, ne00, s01, s02, s03, ne0, ne1, ne2);
+            basalt::kernels::launch_cc(quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_DS4>, num_blocks, block_size, 0, stream, x, ids, vy, ne00, s01, s02, s03, ne0, ne1, ne2);
             break;
     }
 }

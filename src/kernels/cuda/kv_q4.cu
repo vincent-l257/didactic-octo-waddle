@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -186,8 +187,7 @@ void fwht256_cuda(const float* src, float* dst, int64_t n_rows, void* stream) {
     if (n_rows <= 0) return;
     const int rows_per_block = 4;
     const int64_t num_blocks = (n_rows + rows_per_block - 1) / rows_per_block;
-    fwht256_kernel<<<dim3((unsigned) num_blocks), dim3(32, rows_per_block), 0, (cudaStream_t) stream>>>(
-        src, dst, n_rows, 1.0f / 16.0f);
+    basalt::kernels::launch_cc(fwht256_kernel, dim3((unsigned) num_blocks), dim3(32, rows_per_block), 0, (cudaStream_t) stream, src, dst, n_rows, 1.0f / 16.0f);
     check("fwht256 launch");
 }
 
@@ -196,8 +196,7 @@ void kv_append_q4_step(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, 
                        const KvHostPools* host) {
     need_256(s, "kv_append_q4");
     const dim3 grid((unsigned) s.n_head_kv, (unsigned) (s.head_dim / QK4_0), 2);
-    kv_append_q4_kernel<<<grid, 32, 0, (cudaStream_t) stream>>>(
-        k_q4, v_q4, page_table, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
+    basalt::kernels::launch_cc(kv_append_q4_kernel, grid, 32, 0, (cudaStream_t) stream, k_q4, v_q4, page_table, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
         host ? *host : KvHostPools{});
     check("kv_append_q4 launch");
 }
@@ -210,7 +209,7 @@ void kv_append_q4(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, int64
     cudaStream_t cs = (cudaStream_t) stream;
     const KvHostPools h = host ? *host : KvHostPools{}, st = stage ? *stage : KvHostPools{};
     for (int is_v = 0; is_v < 2; ++is_v)
-        kv_append_q4_batch_kernel<<<grid, 32, 0, cs>>>(k_q4, v_q4, page_table, pos0, K, V, (int) s.n_head_kv,
+        basalt::kernels::launch_cc(kv_append_q4_batch_kernel, grid, 32, 0, cs, k_q4, v_q4, page_table, pos0, K, V, (int) s.n_head_kv,
                                                        (int) s.head_dim, (int) s.page_size, is_v, h, st);
     check("kv_append_q4 batch launch");
 }
@@ -223,8 +222,7 @@ void kv_gather_q4_step(const uint8_t* k_q4, const uint8_t* v_q4, const int32_t* 
     const int64_t total_blocks = max_ids * s.n_head_kv * blocks_per_head;
     const int rows_per_block = 4;
     const unsigned num_blocks = (unsigned) ((total_blocks + rows_per_block - 1) / rows_per_block);
-    kv_gather_q4_kernel<<<dim3(num_blocks), dim3(32, rows_per_block), 0, (cudaStream_t) stream>>>(
-        k_q4, v_q4, page_table, ids, step, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size, k_scratch,
+    basalt::kernels::launch_cc(kv_gather_q4_kernel, dim3(num_blocks), dim3(32, rows_per_block), 0, (cudaStream_t) stream, k_q4, v_q4, page_table, ids, step, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size, k_scratch,
         v_scratch);
     check("kv_gather_q4 launch");
 }

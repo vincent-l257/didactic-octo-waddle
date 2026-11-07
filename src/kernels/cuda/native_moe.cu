@@ -30,6 +30,7 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -69,8 +70,7 @@ void native_moe_combine(const float* parts, const float* weights, const float* s
             || overlap(output, row_bytes, weights, weight_bytes)
             || (shared && overlap(output, row_bytes, shared, row_bytes)))
         throw std::invalid_argument("native MoE combine requires aligned spans and disjoint output");
-    combine<<<unsigned((n_embd + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(
-        parts, weights, shared, output, n_embd, int(k));
+    basalt::kernels::launch_cc(combine, unsigned((n_embd + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream), parts, weights, shared, output, n_embd, int(k));
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
@@ -78,8 +78,7 @@ void native_moe_combine_multi(const float* parts, const float* weights, const fl
                               int64_t n_embd, int64_t k, int n_tok, void* stream) {
     if (!stream || n_embd <= 0 || k < 1 || k > 15 || n_tok < 1)
         throw std::invalid_argument("native MoE combine (multi) requires a stream, width, 1..15 experts, tokens");
-    combine<<<dim3(unsigned((n_embd + 255) / 256), (unsigned) n_tok), 256, 0, static_cast<cudaStream_t>(stream)>>>(
-        parts, weights, shared, output, n_embd, int(k));
+    basalt::kernels::launch_cc(combine, dim3(unsigned((n_embd + 255) / 256), (unsigned) n_tok), 256, 0, static_cast<cudaStream_t>(stream), parts, weights, shared, output, n_embd, int(k));
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
@@ -280,23 +279,22 @@ void dec_moe_combine(const float* parts, const float* peer_rows_m, const float* 
         const volatile uint32_t* none = nullptr;
         unsigned* nseen = nullptr;
         if (cpu_done != nullptr)
-            (void) cudaLaunchKernelEx(&cfg, dm_combine4_kernel<10, false, true, true>, parts, peer_rows_m, cpu_rows_m, plan,
+            (void) basalt::kernels::cc_launch_ex(&cfg, dm_combine4_kernel<10, false, true, true>, parts, peer_rows_m, cpu_rows_m, plan,
                                       weights, shared, output, n_embd, ki, tag_done, ring, cpu_done, cpu_seen, shared_gate);
         else if (dep && tag_done != nullptr)
-            (void) cudaLaunchKernelEx(&cfg, dm_combine4_kernel<10, true, true>, parts, peer_rows_m, cpu_rows_m, plan, weights,
+            (void) basalt::kernels::cc_launch_ex(&cfg, dm_combine4_kernel<10, true, true>, parts, peer_rows_m, cpu_rows_m, plan, weights,
                                       shared, output, n_embd, ki, tag_done, ring, none, nseen, shared_gate);
         else if (dep)
-            (void) cudaLaunchKernelEx(&cfg, dm_combine4_kernel<10, true>, parts, peer_rows_m, cpu_rows_m, plan, weights,
+            (void) basalt::kernels::cc_launch_ex(&cfg, dm_combine4_kernel<10, true>, parts, peer_rows_m, cpu_rows_m, plan, weights,
                                       shared, output, n_embd, ki, none, 0u, none, nseen, shared_gate);
         else
-            (void) cudaLaunchKernelEx(&cfg, dm_combine4_kernel<10, false>, parts, peer_rows_m, cpu_rows_m, plan, weights,
+            (void) basalt::kernels::cc_launch_ex(&cfg, dm_combine4_kernel<10, false>, parts, peer_rows_m, cpu_rows_m, plan, weights,
                                       shared, output, n_embd, ki, none, 0u, none, nseen, shared_gate);
         const auto error = cudaGetLastError();
         if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
         return;
     }
-    dm_combine_kernel<<<dim3(unsigned((n_embd + 255) / 256), (unsigned) n_tok), 256, 0,
-                        static_cast<cudaStream_t>(stream)>>>(parts, peer_rows_m, cpu_rows_m, plan, weights, shared,
+    basalt::kernels::launch_cc(dm_combine_kernel, dim3(unsigned((n_embd + 255) / 256), (unsigned) n_tok), 256, 0, static_cast<cudaStream_t>(stream), parts, peer_rows_m, cpu_rows_m, plan, weights, shared,
                                                              output, n_embd, int(k), peer_done_m, host_flag_m, ring,
                                                              shared_gate);
     const auto error = cudaGetLastError();

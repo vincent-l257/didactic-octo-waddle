@@ -29,6 +29,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -91,7 +92,7 @@ void check_launch() {
 void native_gr_down_silu(float* lo, int hc_lr, int hc, void* stream) {
     check_shape(hc_lr, hc);
     check_pointer(lo);
-    down_silu<<<blocks(hc_lr), THREADS, 0, static_cast<cudaStream_t>(stream)>>>(lo, hc_lr, 1.0f / float(hc));
+    basalt::kernels::launch_cc(down_silu, blocks(hc_lr), THREADS, 0, static_cast<cudaStream_t>(stream), lo, hc_lr, 1.0f / float(hc));
     check_launch();
 }
 void native_gr_pre_gated(const float* xn, float* gate, float* mixed,
@@ -99,17 +100,16 @@ void native_gr_pre_gated(const float* xn, float* gate, float* mixed,
     check_shape(n_embd, hc);
     check_pointer(xn); check_pointer(gate); check_pointer(mixed);
     if (fused_layer)
-        pre_gated<true><<<blocks(n_embd), THREADS, 0, static_cast<cudaStream_t>(stream)>>>(xn, gate, mixed, n_embd, hc, 1.0f / float(hc));
+        basalt::kernels::launch_cc(pre_gated<true>, blocks(n_embd), THREADS, 0, static_cast<cudaStream_t>(stream), xn, gate, mixed, n_embd, hc, 1.0f / float(hc));
     else
-        pre_gated<false><<<blocks(n_embd), THREADS, 0, static_cast<cudaStream_t>(stream)>>>(xn, gate, mixed, n_embd, hc, 1.0f / float(hc));
+        basalt::kernels::launch_cc(pre_gated<false>, blocks(n_embd), THREADS, 0, static_cast<cudaStream_t>(stream), xn, gate, mixed, n_embd, hc, 1.0f / float(hc));
     check_launch();
 }
 void native_gr_post(const float* residual, const float* block_out, const float* inject,
                     float* output, int n_embd, int hc, void* stream) {
     check_shape(n_embd, hc);
     check_pointer(residual); check_pointer(block_out); check_pointer(inject); check_pointer(output);
-    post<<<blocks(std::size_t(n_embd) * hc), THREADS, 0, static_cast<cudaStream_t>(stream)>>>(
-        residual, block_out, inject, output, n_embd, hc, 1.0f / float(hc));
+    basalt::kernels::launch_cc(post, blocks(std::size_t(n_embd) * hc), THREADS, 0, static_cast<cudaStream_t>(stream), residual, block_out, inject, output, n_embd, hc, 1.0f / float(hc));
     check_launch();
 }
 } // namespace basalt::kernels

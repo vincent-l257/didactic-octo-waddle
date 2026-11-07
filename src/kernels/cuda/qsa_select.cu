@@ -1,5 +1,6 @@
 // src/kernels/cuda/qsa_select.cu - see include/basalt/kernels/qsa_select.hpp.
 #include <cstdlib>
+#include "basalt/kernels/sm70_emu.cuh"
 #include <cstring>
 #include "basalt/kernels/qsa_select.hpp"
 #include "basalt/kernels/qsa_seg.hpp"
@@ -13,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -169,14 +171,22 @@ constexpr int TC_KS = IDX_DIM + 4;               // key row stride
 
 __device__ __forceinline__ uint32_t tf32_hi(float x) {
     uint32_t r;
+#if BASALT_SM80
     asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x));
+#else
+    r = basalt::v70::tf32_rna(x);
+#endif
     return r;
 }
 __device__ __forceinline__ void mma_tf32(float* c, const uint32_t* a, const uint32_t* b) {
+#if BASALT_SM80
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                  "{%0,%1,%2,%3};\n"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+#else
+    basalt::v70::mma_tf32_1688(c, a, b);
+#endif
 }
 
 __global__ void __launch_bounds__(128) block_scores_tc_kernel(const float* __restrict__ pooled,
@@ -1066,7 +1076,7 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
     }
     const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
     const dim3 grid((unsigned) ((reach + SCORE_WARPS - 1) / SCORE_WARPS), (unsigned) nq);
-    block_scores_kernel<<<grid, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, max_blocks,
+    basalt::kernels::launch_cc(block_scores_kernel, grid, SCORE_WARPS * 32, 0, (cudaStream_t) stream, pooled, dead, q_idx, steps, max_blocks,
                                                                               scores);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { basalt::log::error("basalt", "qsa_block_scores: %s", cudaGetErrorString(e)); std::exit(1); }
@@ -1108,7 +1118,7 @@ bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_
     cudaGetDevice(&adev);
     const int bytes = (TC_QT * TC_QS + TC_NB * TC_KS) * (int) sizeof(float);
     if (!attr[adev].load(std::memory_order_acquire)) {
-        if (cudaFuncSetAttribute(block_scores_tc_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
+        if (basalt::kernels::cc_func_set_attribute(block_scores_tc_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
             cudaSuccess) {
             cudaGetLastError();
             return false;
@@ -1118,9 +1128,9 @@ bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_
     const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
     const int64_t per = (int64_t) TC_NB * TC_ITER;
     const dim3 grid((unsigned) ((reach + per - 1) / per), (unsigned) ((nq + TC_QT - 1) / TC_QT));
-    block_scores_tc_kernel<<<grid, 128, bytes, (cudaStream_t) stream>>>(pooled, q_idx, steps, nq, max_blocks, reach,
+    basalt::kernels::launch_cc(block_scores_tc_kernel, grid, 128, bytes, (cudaStream_t) stream, pooled, q_idx, steps, nq, max_blocks, reach,
                                                                          scores);
-    block_scores_tail_kernel<<<(unsigned) nq, 32, 0, (cudaStream_t) stream>>>(dead, q_idx, steps, max_blocks, scores);
+    basalt::kernels::launch_cc(block_scores_tail_kernel, (unsigned) nq, 32, 0, (cudaStream_t) stream, dead, q_idx, steps, max_blocks, scores);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { basalt::log::error("basalt", "qsa_block_scores_tc: %s", cudaGetErrorString(e)); std::exit(1); }
     return true;
@@ -1133,7 +1143,7 @@ void qsa_block_topk_ref(const float* scores, const int32_t* steps, int64_t nq, i
         basalt::log::error("basalt", "qsa_block_topk: unsupported geometry or cap");
         std::exit(1);
     }
-    block_topk_kernel<<<(unsigned) nq, TOPK_T, 0, (cudaStream_t) stream>>>(scores, steps, max_blocks, cap, ids);
+    basalt::kernels::launch_cc(block_topk_kernel, (unsigned) nq, TOPK_T, 0, (cudaStream_t) stream, scores, steps, max_blocks, cap, ids);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { basalt::log::error("basalt", "qsa_block_topk: %s", cudaGetErrorString(e)); std::exit(1); }
 }
@@ -1159,7 +1169,7 @@ bool topk_cluster_launch(const float* scores, const int32_t* steps, int64_t nq, 
         cudaFuncAttributes fa{};
         const bool code = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
                           major >= 9 &&
-                          cudaFuncGetAttributes(&fa, kern) == cudaSuccess && fa.ptxVersion >= 90 &&
+                          basalt::kernels::cc_func_get_attributes(&fa, kern) == cudaSuccess && fa.ptxVersion >= 90 &&
                           fa.binaryVersion >= 90;
         cudaGetLastError();
         ok[dev] = code ? 1 : 2;
@@ -1178,7 +1188,7 @@ bool topk_cluster_launch(const float* scores, const int32_t* steps, int64_t nq, 
         q.dynamicSmemBytes = smem;
         q.attrs = qa;
         q.numAttrs = 1;
-        if (cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem) !=
+        if (basalt::kernels::cc_func_set_attribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem) !=
                 cudaSuccess ||
             cudaOccupancyMaxActiveClusters(&clusters, kern, &q) != cudaSuccess || clusters < 1) {
             cudaGetLastError();
@@ -1203,7 +1213,7 @@ bool topk_cluster_launch(const float* scores, const int32_t* steps, int64_t nq, 
         at[1].val.programmaticStreamSerializationAllowed = 1;
         cfg.numAttrs = 2;
     }
-    const cudaError_t e = cudaLaunchKernelEx(&cfg, kern, scores, steps, max_blocks, cap, ids);
+    const cudaError_t e = basalt::kernels::cc_launch_ex(&cfg, kern, scores, steps, max_blocks, cap, ids);
     if (e != cudaSuccess) { basalt::log::error("basalt", "qsa_block_topk cluster: %s", cudaGetErrorString(e)); std::exit(1); }
     return true;
 }
@@ -1233,12 +1243,12 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
         std::exit(1);
     }
     if (reach > fit)   // past the register kernel's reach
-        block_topk_wide_kernel<<<(unsigned) nq, TK_T, 0, (cudaStream_t) stream>>>(scores, steps, max_blocks, cap, ids);
+        basalt::kernels::launch_cc(block_topk_wide_kernel, (unsigned) nq, TK_T, 0, (cudaStream_t) stream, scores, steps, max_blocks, cap, ids);
     else
     if (reach <= (int64_t) TK_T * TK_PER)
-        block_topk_reg_kernel<TK_PER><<<(unsigned) nq, TK_T, 0, (cudaStream_t) stream>>>(scores, steps, max_blocks, cap, ids);
+        basalt::kernels::launch_cc(block_topk_reg_kernel<TK_PER>, (unsigned) nq, TK_T, 0, (cudaStream_t) stream, scores, steps, max_blocks, cap, ids);
     else
-        block_topk_reg_kernel<TK_PER_MAX><<<(unsigned) nq, TK_T, 0, (cudaStream_t) stream>>>(scores, steps, max_blocks, cap, ids);
+        basalt::kernels::launch_cc(block_topk_reg_kernel<TK_PER_MAX>, (unsigned) nq, TK_T, 0, (cudaStream_t) stream, scores, steps, max_blocks, cap, ids);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { basalt::log::error("basalt", "qsa_block_topk: %s", cudaGetErrorString(e)); std::exit(1); }
 }

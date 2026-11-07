@@ -2,6 +2,7 @@
 //
 // Built with --use_fast_math like native_mmvq.cu, whose Q8_0 x q8_1 dot the exact rows repeat.
 #include "basalt/kernels/q80_vhead.hpp"
+#include "basalt/kernels/sm70_emu.cuh"
 #include "basalt/kernels/dp4a.hpp"
 #include "basalt/kernels/pdl.hpp"
 #include "q80p.cuh"
@@ -16,6 +17,7 @@
 #include <cstdlib>
 #include <mutex>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -428,7 +430,11 @@ __global__ void __launch_bounds__(WPB * WARP) q80p_screen_kernel(const uint8_t* 
 #pragma unroll
         for (int i = 0; i < VHIST / 32; ++i) v[i] = __ldcg(&vs->hist[c][i * 32 + lane]);
 #pragma unroll
+#if BASALT_SM80
         for (int i = 0; i < VHIST / 32; ++i) tot[i] = __reduce_add_sync(0xffffffffu, v[i]);
+#else
+        for (int i = 0; i < VHIST / 32; ++i) tot[i] = basalt::v70::reduce_add(0xffffffffu, v[i]);
+#endif
         unsigned run = 0, row_v = 0;
         int rw = -1;
 #pragma unroll
@@ -639,8 +645,8 @@ void grids(int& screen, int& rows) {
         if (!set[dev].load(std::memory_order_relaxed)) {
             int sms = 0, a = 0, b = 0;
             cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
-            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&a, q80p_screen_kernel<8>, WPB * WARP, 0);
-            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&b, q80p_rows_kernel<NC>, WPB * WARP,
+            basalt::kernels::cc_occupancy(&a, q80p_screen_kernel<8>, WPB * WARP, 0);
+            basalt::kernels::cc_occupancy(&b, q80p_rows_kernel<NC>, WPB * WARP,
                                                           (size_t) NC * kBlocks * 4 * sizeof(int4));
             g[dev][0] = (sms > 0 ? sms : 1) * (a > 0 ? a : 1);
             g[dev][1] = (sms > 0 ? sms : 1) * (b > 0 ? b : 1);
@@ -671,7 +677,7 @@ void launch_list(const float* y, int n_out, const int* k, VScratch* vs, unsigned
     int sms = 0, dev = 0;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
-    q80p_list_kernel<NC><<<(unsigned) std::max(sms, 1), 256, 0, s>>>(y, n_out, k, vs, list, link);
+    basalt::kernels::launch_cc(q80p_list_kernel<NC>, (unsigned) std::max(sms, 1), 256, 0, s, y, n_out, k, vs, list, link);
 }
 
 void check(const char* what) {
@@ -710,13 +716,13 @@ bool q80p_supported(int n_in, int ncols) { return n_in == kBlocks * 32 && ncols 
 
 void q80p_pack(void* rows, int64_t n, void* stream) {
     if (n <= 0) return;
-    q80p_pack_kernel<<<(unsigned) n, kBlocks, 0, (cudaStream_t) stream>>>((uint8_t*) rows);
+    basalt::kernels::launch_cc(q80p_pack_kernel, (unsigned) n, kBlocks, 0, (cudaStream_t) stream, (uint8_t*) rows);
     check("q80p_pack");
 }
 
 void q80p_unpack(void* rows, int64_t n, void* stream) {
     if (n <= 0) return;
-    q80p_unpack_kernel<<<(unsigned) n, kBlocks, 0, (cudaStream_t) stream>>>((uint8_t*) rows);
+    basalt::kernels::launch_cc(q80p_unpack_kernel, (unsigned) n, kBlocks, 0, (cudaStream_t) stream, (uint8_t*) rows);
     check("q80p_unpack");
 }
 
@@ -746,7 +752,7 @@ void q80p_vhead_post(const void* x_q8_1, int n_in, int ncols, const int* k, void
         std::exit(1);
     }
     const int n16 = (int) ((size_t) ncols * (n_in / 32) * sizeof(Q81Block) / 16);
-    q80p_post_kernel<<<1, 256, 0, (cudaStream_t) stream>>>((const uint4*) x_q8_1, n16, k, (uint4*) input,
+    basalt::kernels::launch_cc(q80p_post_kernel, 1, 256, 0, (cudaStream_t) stream, (const uint4*) x_q8_1, n16, k, (uint4*) input,
                                                           (int) input_k_offset(n_in, ncols), (unsigned*) link);
     check("q80p_vhead_post");
 }
@@ -758,7 +764,7 @@ void q80p_vhead_fetch(const void* input, const void* link, void* x_q8_1, int* k,
         std::exit(1);
     }
     const int n16 = (int) ((size_t) ncols * (n_in / 32) * sizeof(Q81Block) / 16);
-    q80p_fetch_kernel<<<1, 256, 0, (cudaStream_t) stream>>>((const uint4*) input, n16, (int) input_k_offset(n_in, ncols),
+    basalt::kernels::launch_cc(q80p_fetch_kernel, 1, 256, 0, (cudaStream_t) stream, (const uint4*) input, n16, (int) input_k_offset(n_in, ncols),
                                                            (const unsigned*) link, (uint4*) x_q8_1, k,
                                                            (VScratch*) scratch);
     check("q80p_vhead_fetch");
@@ -769,18 +775,18 @@ static void prepare_cols() {
     int screen = 0, rows = 0;
     grids<NC>(screen, rows);
     cudaFuncAttributes fa;
-    cudaFuncGetAttributes(&fa, q80p_screen_kernel<NC>);
-    cudaFuncGetAttributes(&fa, q80p_rows_kernel<NC>);
-    cudaFuncGetAttributes(&fa, q80p_list_kernel<NC>);
+    basalt::kernels::cc_func_get_attributes(&fa, q80p_screen_kernel<NC>);
+    basalt::kernels::cc_func_get_attributes(&fa, q80p_rows_kernel<NC>);
+    basalt::kernels::cc_func_get_attributes(&fa, q80p_list_kernel<NC>);
 }
 
 void q80p_vhead_prepare() {
     prepare_cols<1>(); prepare_cols<2>(); prepare_cols<3>(); prepare_cols<4>();
     prepare_cols<5>(); prepare_cols<6>(); prepare_cols<7>(); prepare_cols<8>();
     cudaFuncAttributes fa;
-    cudaFuncGetAttributes(&fa, q80p_post_kernel);
-    cudaFuncGetAttributes(&fa, q80p_fetch_kernel);
-    cudaFuncGetAttributes(&fa, q80p_merge_kernel);
+    basalt::kernels::cc_func_get_attributes(&fa, q80p_post_kernel);
+    basalt::kernels::cc_func_get_attributes(&fa, q80p_fetch_kernel);
+    basalt::kernels::cc_func_get_attributes(&fa, q80p_merge_kernel);
     check("q80p_vhead_prepare");
 }
 
@@ -818,7 +824,7 @@ void q80p_vhead_merge(float* y, int n_out, int first, int ncols, int list_rows, 
                            first, list_rows, ncols);
         std::exit(1);
     }
-    q80p_merge_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(y, n_out, first, ncols, list_rows, k, (const unsigned*) list,
+    basalt::kernels::launch_cc(q80p_merge_kernel, 1, 256, 0, (cudaStream_t) stream, y, n_out, first, ncols, list_rows, k, (const unsigned*) list,
                                                          (unsigned*) link);
     check("q80p_vhead_merge");
 }

@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -281,9 +282,9 @@ bool hc8_gr_read_multi(const FusedGrArgs* a, int n_tok, int64_t n_embd, int64_t 
     p.T = n_tok; p.n = (int) n_embd; p.hc = (int) hc; p.lr = vd.rows; p.ninj = inj ? (int) hc : 0;
     p.apply = a[0].apply; p.eps = a[0].eps;
     cudaStream_t st = (cudaStream_t) stream;
-    hc8_norm_kernel<<<dim3((unsigned) hc, (unsigned) n_tok), 256, 0, st>>>(p);
-    hc8_down_kernel<<<(unsigned) ((p.lr + p.ninj + DOWN_ROWS - 1) / DOWN_ROWS), DOWN_THREADS, 0, st>>>(p);
-    hc8_up_kernel<<<(unsigned) ((n_embd + UP_THREADS / 32 - 1) / (UP_THREADS / 32)), UP_THREADS, 0, st>>>(p);
+    basalt::kernels::launch_cc(hc8_norm_kernel, dim3((unsigned) hc, (unsigned) n_tok), 256, 0, st, p);
+    basalt::kernels::launch_cc(hc8_down_kernel, (unsigned) ((p.lr + p.ninj + DOWN_ROWS - 1) / DOWN_ROWS), DOWN_THREADS, 0, st, p);
+    basalt::kernels::launch_cc(hc8_up_kernel, (unsigned) ((n_embd + UP_THREADS / 32 - 1) / (UP_THREADS / 32)), UP_THREADS, 0, st, p);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "hc8_gr_read: %s", cudaGetErrorString(e));

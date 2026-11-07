@@ -52,6 +52,7 @@ private:
 
 #if defined(__CUDACC__)
 #include <cuda_runtime.h>
+#include "basalt/kernels/cc_launch.hpp"
 
 #if defined(CUDART_VERSION) && CUDART_VERSION >= 12030
 #define PDL_LAUNCH 1
@@ -150,7 +151,7 @@ inline void launch_pdl(void (*kernel)(KArgs...), dim3 grid, dim3 block, size_t s
         }
     }
 #endif
-    kernel<<<grid, block, smem, stream>>>(args...);
+    launch_cc(kernel, grid, block, smem, stream, args...);
 }
 
 }  // namespace basalt::kernels

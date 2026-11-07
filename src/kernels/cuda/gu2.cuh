@@ -408,5 +408,5 @@ void launch_dependent(void (*kernel)(KArgs...), dim3 grid, cudaStream_t s, Args.
     cfg.stream = s;
     cfg.attrs = at;
     cfg.numAttrs = 1;
-    (void) cudaLaunchKernelEx(&cfg, kernel, args...);   // an error stays for the caller's check
+    (void) basalt::kernels::cc_launch_ex(&cfg, kernel, args...);   // an error stays for the caller's check
 }

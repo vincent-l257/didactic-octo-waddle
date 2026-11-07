@@ -46,6 +46,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -197,8 +198,7 @@ void router_top10(const float* logits, int n_tokens, int n_expert, int k, int* i
     const size_t taken_bytes = ((size_t) n_expert + 15u) & ~(size_t) 15u;
     const size_t smem =
         taken_bytes + (size_t) n_expert * sizeof(double) + (size_t) n_expert * sizeof(float);
-    router_top10_kernel<<<(unsigned) n_tokens, threads, smem, (cudaStream_t) stream>>>(
-        logits, n_tokens, n_expert, k, ids, weights);
+    basalt::kernels::launch_cc(router_top10_kernel, (unsigned) n_tokens, threads, smem, (cudaStream_t) stream, logits, n_tokens, n_expert, k, ids, weights);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "router_top10 launch: %s", cudaGetErrorString(e));

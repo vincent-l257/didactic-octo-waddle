@@ -41,6 +41,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <string>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -1480,8 +1481,8 @@ int mmvq_mma_sms() {
         cudaFuncAttributes f1{}, f2{};
         const bool q = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
                        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess &&
-                       cudaFuncGetAttributes(&f1, native_iq4_xs_mma_kernel<1>) == cudaSuccess &&
-                       cudaFuncGetAttributes(&f2, native_iq4_xs_mma_kernel<2>) == cudaSuccess;
+                       basalt::kernels::cc_func_get_attributes(&f1, native_iq4_xs_mma_kernel<1>) == cudaSuccess &&
+                       basalt::kernels::cc_func_get_attributes(&f2, native_iq4_xs_mma_kernel<2>) == cudaSuccess;
         if (!q) (void) cudaGetLastError();
         known[dev] = q && major >= 8 && f1.ptxVersion >= 80 && f2.ptxVersion >= 80 && sms > 0
                          ? sms : -1;
@@ -1547,12 +1548,12 @@ void small_mmvq(const void* weights, const void* x_q8_1, float* y,
         if constexpr (std::is_same_v<Weight, Q80Block>)
             launch_pdl(native_small_q80_kernel<true>, dim3(blocks), threads, 0, s, w, x, y, n_in, n_out);
         else
-            native_small_mmvq_kernel<Weight, Qi, true><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+            basalt::kernels::launch_cc(native_small_mmvq_kernel<Weight, Qi, true>, blocks, threads, 0, s, w, x, y, n_in, n_out);
     } else {
         if constexpr (std::is_same_v<Weight, Q80Block>)
             launch_pdl(native_small_q80_kernel<false>, dim3(unsigned(n_out)), threads, 0, s, w, x, y, n_in, n_out);
         else
-            native_small_mmvq_kernel<Weight, Qi, false><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
+            basalt::kernels::launch_cc(native_small_mmvq_kernel<Weight, Qi, false>, unsigned(n_out), threads, 0, s, w, x, y, n_in, n_out);
     }
     launch_check();
 }
@@ -1633,9 +1634,9 @@ void native_q5_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     const dim3 threads(WARP, WARPS);
     if (n_in / QK < VDR * WARPS * WARP / QI) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
-        native_q5_k_mmvq_kernel<true><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q5_k_mmvq_kernel<true>, blocks, threads, 0, s, w, x, y, n_in, n_out);
     } else {
-        native_q5_k_mmvq_kernel<false><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q5_k_mmvq_kernel<false>, unsigned(n_out), threads, 0, s, w, x, y, n_in, n_out);
     }
     launch_check();
 }
@@ -1673,9 +1674,9 @@ void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y,
     const dim3 threads(WARP, WARPS);
     if (n_in / 64 < WARPS * WARP / 2) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
-        native_q2_0_mmvq_kernel<true><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q2_0_mmvq_kernel<true>, blocks, threads, 0, s, w, x, y, n_in, n_out);
     } else {
-        native_q2_0_mmvq_kernel<false><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q2_0_mmvq_kernel<false>, unsigned(n_out), threads, 0, s, w, x, y, n_in, n_out);
     }
     launch_check();
 }
@@ -1712,9 +1713,9 @@ void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     const dim3 threads(WARP, WARPS);
     if (n_in / 256 < WARPS * WARP / 16) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
-        native_q3_k_mmvq_kernel<true><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q3_k_mmvq_kernel<true>, blocks, threads, 0, s, w, x, y, n_in, n_out);
     } else {
-        native_q3_k_mmvq_kernel<false><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q3_k_mmvq_kernel<false>, unsigned(n_out), threads, 0, s, w, x, y, n_in, n_out);
     }
     launch_check();
 }
@@ -1758,9 +1759,9 @@ void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
     const dim3 threads(WARP, WARPS);
     if (n_in / 256 < 4 * WARPS * WARP / 32) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
-        native_iq4_xs_mmvq_kernel<true><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_iq4_xs_mmvq_kernel<true>, blocks, threads, 0, s, w, x, y, n_in, n_out);
     } else {
-        native_iq4_xs_mmvq_kernel<false><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_iq4_xs_mmvq_kernel<false>, unsigned(n_out), threads, 0, s, w, x, y, n_in, n_out);
     }
     launch_check();
 }
@@ -1797,9 +1798,9 @@ void native_q4_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     const dim3 threads(WARP, WARPS);
     if (n_in / 256 < WARPS * WARP / 16) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
-        native_q4_k_mmvq_kernel<true><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q4_k_mmvq_kernel<true>, blocks, threads, 0, s, w, x, y, n_in, n_out);
     } else {
-        native_q4_k_mmvq_kernel<false><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q4_k_mmvq_kernel<false>, unsigned(n_out), threads, 0, s, w, x, y, n_in, n_out);
     }
     launch_check();
 }
@@ -1836,9 +1837,9 @@ void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     const dim3 threads(WARP, WARPS);
     if (n_in / 256 < WARPS * WARP / 32) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
-        native_q6_k_mmvq_kernel<true><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q6_k_mmvq_kernel<true>, blocks, threads, 0, s, w, x, y, n_in, n_out);
     } else {
-        native_q6_k_mmvq_kernel<false><<<unsigned(n_out), threads, 0, s>>>(w, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q6_k_mmvq_kernel<false>, unsigned(n_out), threads, 0, s, w, x, y, n_in, n_out);
     }
     launch_check();
 }
@@ -1858,9 +1859,9 @@ void native_q6_k_mmvq_rows(const void* weights, const int32_t* rows, const void*
     const dim3 threads(WARP, WARPS);
     if (n_in / 256 < WARPS * WARP / 32) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
-        native_q6_k_mmvq_rows_kernel<true><<<blocks, threads, 0, s>>>(w, rows, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q6_k_mmvq_rows_kernel<true>, blocks, threads, 0, s, w, rows, x, y, n_in, n_out);
     } else {
-        native_q6_k_mmvq_rows_kernel<false><<<unsigned(n_out), threads, 0, s>>>(w, rows, x, y, n_in, n_out);
+        basalt::kernels::launch_cc(native_q6_k_mmvq_rows_kernel<false>, unsigned(n_out), threads, 0, s, w, rows, x, y, n_in, n_out);
     }
     launch_check();
 }

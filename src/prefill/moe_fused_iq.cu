@@ -51,6 +51,7 @@
 #include <cstdlib>
 #include <mutex>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::prefill::fused {
 namespace {
@@ -851,12 +852,12 @@ DevInfo g_dev[32];
 
 template <int T, bool GU, int WW> bool setup_ww(int& occ) {
     cudaFuncAttributes fa{};
-    if (cudaFuncGetAttributes(&fa, native_kernel<T, GU, WW>) != cudaSuccess || fa.ptxVersion < 80) return false;
-    if (cudaFuncSetAttribute(native_kernel<T, GU, WW>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+    if (basalt::kernels::cc_func_get_attributes(&fa, native_kernel<T, GU, WW>) != cudaSuccess || fa.ptxVersion < 80) return false;
+    if (basalt::kernels::cc_func_set_attribute(native_kernel<T, GU, WW>, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              (int) smem_bytes(T, WW)) != cudaSuccess)
         return false;
     int o = 0;
-    if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&o, native_kernel<T, GU, WW>, THREADS, smem_bytes(T, WW)) !=
+    if (basalt::kernels::cc_occupancy(&o, native_kernel<T, GU, WW>, THREADS, smem_bytes(T, WW)) !=
             cudaSuccess || o < 1)
         return false;
     occ = std::min(occ, o);
@@ -865,11 +866,11 @@ template <int T, bool GU, int WW> bool setup_ww(int& occ) {
 template <int T, bool GU> bool setup_one(int& occ) { return setup_ww<T, GU, 4>(occ) && setup_ww<T, GU, 2>(occ); }
 template <bool GU> bool setup_v2(int& occ) {
     cudaFuncAttributes fa{};
-    if (cudaFuncGetAttributes(&fa, v2_kernel<GU>) != cudaSuccess || fa.ptxVersion < 80) return false;
-    if (cudaFuncSetAttribute(v2_kernel<GU>, cudaFuncAttributeMaxDynamicSharedMemorySize, V2<GU>::SMEM) != cudaSuccess)
+    if (basalt::kernels::cc_func_get_attributes(&fa, v2_kernel<GU>) != cudaSuccess || fa.ptxVersion < 80) return false;
+    if (basalt::kernels::cc_func_set_attribute(v2_kernel<GU>, cudaFuncAttributeMaxDynamicSharedMemorySize, V2<GU>::SMEM) != cudaSuccess)
         return false;
     int o = 0;
-    if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&o, v2_kernel<GU>, V2_THREADS, V2<GU>::SMEM) != cudaSuccess ||
+    if (basalt::kernels::cc_occupancy(&o, v2_kernel<GU>, V2_THREADS, V2<GU>::SMEM) != cudaSuccess ||
         o < 1)
         return false;
     occ = std::min(occ, o);
@@ -941,14 +942,14 @@ void launch(int ww, unsigned grid, const Batch& b, const NativeGeom& g, const Ta
             const int32_t* src, void* out, float* dm, cudaStream_t s) {
     const uint8_t* a = (const uint8_t*) act;
     uint8_t* o = (uint8_t*) out;
-    if (ww == 4) native_kernel<T, GU, 4><<<grid, THREADS, smem_bytes(T, 4), s>>>(b, g, tb, a, src, o, dm);
-    else native_kernel<T, GU, 2><<<grid, THREADS, smem_bytes(T, 2), s>>>(b, g, tb, a, src, o, dm);
+    if (ww == 4) basalt::kernels::launch_cc(native_kernel<T, GU, 4>, grid, THREADS, smem_bytes(T, 4), s, b, g, tb, a, src, o, dm);
+    else basalt::kernels::launch_cc(native_kernel<T, GU, 2>, grid, THREADS, smem_bytes(T, 2), s, b, g, tb, a, src, o, dm);
 }
 
 template <bool GU>
 void launch_v2(unsigned grid, const Batch& b, const NativeGeom& g, const Tables& tb, const void* act,
                const int32_t* src, void* out, float* dm, int* ctr, cudaStream_t s) {
-    v2_kernel<GU><<<grid, V2_THREADS, V2<GU>::SMEM, s>>>(b, g, tb, (const uint8_t*) act, src, (uint8_t*) out, dm, ctr);
+    basalt::kernels::launch_cc(v2_kernel<GU>, grid, V2_THREADS, V2<GU>::SMEM, s, b, g, tb, (const uint8_t*) act, src, (uint8_t*) out, dm, ctr);
 }
 
 // The work item's shape for a layer of `n` routed rows over `n_expert` experts: 128 routed rows when an expert has
@@ -970,7 +971,7 @@ bool native_v2_ready() { return v2_occ() > 0; }
 void quantize_act_native(const float* x, int64_t rows, int64_t cols, void* xa, void* stream) {
     if (rows <= 0) return;
     const int64_t nblk = rows * (cols / 64);
-    quant_act_nat_kernel<<<blocks(nblk, 8), 256, 0, (cudaStream_t) stream>>>(x, nblk, (uint8_t*) xa);
+    basalt::kernels::launch_cc(quant_act_nat_kernel, blocks(nblk, 8), 256, 0, (cudaStream_t) stream, x, nblk, (uint8_t*) xa);
     ck(cudaGetLastError(), "quantize_act_native");
 }
 

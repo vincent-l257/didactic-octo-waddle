@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -117,10 +118,10 @@ void native_rope_apply(const float* x, float* out, int rows, int head_dim,
     const RopeTab rt = rope_table_for(scaling);
     const dim3 grid((head_dim / 2 + 127) / 128, rows);
     if (rt.cos != nullptr)
-        apply<true><<<grid, 128, 0, static_cast<cudaStream_t>(stream)>>>(x, out, rows, head_dim, n_rot, theta_scale,
+        basalt::kernels::launch_cc(apply<true>, grid, 128, 0, static_cast<cudaStream_t>(stream), x, out, rows, head_dim, n_rot, theta_scale,
             k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), rt);
     else
-        apply<false><<<grid, 128, 0, static_cast<cudaStream_t>(stream)>>>(x, out, rows, head_dim, n_rot, theta_scale,
+        basalt::kernels::launch_cc(apply<false>, grid, 128, 0, static_cast<cudaStream_t>(stream), x, out, rows, head_dim, n_rot, theta_scale,
             k.freq_scale, k.corr_low, k.corr_high, k.ext_factor, k.attn_factor, positions, mrope_table(), rt);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));

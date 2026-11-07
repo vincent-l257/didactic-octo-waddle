@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -159,7 +160,7 @@ void gdn_step(float* state, const float* q, const float* k, const float* v, cons
     }
     const dim3 grid((unsigned) ((s.S + JTHREADS - 1) / JTHREADS),
                     (unsigned) ((s.h_v + MAX_H - 1) / MAX_H));
-    gdn_step_kernel<<<grid, JTHREADS, 0, (cudaStream_t) stream>>>(state, q, k, v, gate, beta, o, (int) s.S,
+    basalt::kernels::launch_cc(gdn_step_kernel, grid, JTHREADS, 0, (cudaStream_t) stream, state, q, k, v, gate, beta, o, (int) s.S,
                                                                   (int) s.h_k, (int) s.h_v);
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
@@ -174,7 +175,7 @@ void gdn_conv_step(float* conv_state, const float* x, const float* kW, float* ou
                    int64_t d_conv, void* stream) {
     if (channels <= 0 || d_conv < 1) return;
     const int blocks = (int) ((channels + 255) / 256);
-    gdn_conv_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>(conv_state, x, kW, out, (int) channels,
+    basalt::kernels::launch_cc(gdn_conv_kernel, blocks, 256, 0, (cudaStream_t) stream, conv_state, x, kW, out, (int) channels,
                                                                (int) d_conv);
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
@@ -191,7 +192,7 @@ void gdn_l2_norm(float* x, int64_t rows, int64_t cols, float eps, void* stream) 
         basalt::log::error("basalt", "gdn_l2_norm: cols = %lld exceeds the 1024-wide warp reduction", (long long) cols);
         std::exit(1);
     }
-    gdn_l2_kernel<<<(unsigned) rows, 32, 0, (cudaStream_t) stream>>>(x, (int) cols, eps);
+    basalt::kernels::launch_cc(gdn_l2_kernel, (unsigned) rows, 32, 0, (cudaStream_t) stream, x, (int) cols, eps);
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
         if (e != cudaSuccess) {
@@ -204,7 +205,7 @@ void gdn_l2_norm(float* x, int64_t rows, int64_t cols, float eps, void* stream) 
 void gdn_out_norm(const float* o, const float* z, const float* ssm_norm, float* y, int64_t h_v, int64_t S,
                   float eps, void* stream) {
     if (h_v <= 0 || S <= 0) return;
-    gdn_out_norm_kernel<<<(unsigned) h_v, 32, 0, (cudaStream_t) stream>>>(o, z, ssm_norm, y, (int) S, eps);
+    basalt::kernels::launch_cc(gdn_out_norm_kernel, (unsigned) h_v, 32, 0, (cudaStream_t) stream, o, z, ssm_norm, y, (int) S, eps);
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
         if (e != cudaSuccess) {

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -352,17 +353,17 @@ void s_gemv(const uint16_t* x, const uint8_t* codes, const float* scales, const 
     const int cb = (int) form.codebook;
     switch (form.code_bits) {
         case 2:
-            s_gemv_kernel<2><<<(unsigned) blocks, threads>>>(x, codes, scales, offset, y, n_in, n_out,
+            basalt::kernels::launch_cc(s_gemv_kernel<2>, (unsigned) blocks, threads, 0, 0, x, codes, scales, offset, y, n_in, n_out,
                                                              form.code_bias, cb, form.group_elems,
                                                              form.has_offset ? 1 : 0);
             break;
         case 4:
-            s_gemv_kernel<4><<<(unsigned) blocks, threads>>>(x, codes, scales, offset, y, n_in, n_out,
+            basalt::kernels::launch_cc(s_gemv_kernel<4>, (unsigned) blocks, threads, 0, 0, x, codes, scales, offset, y, n_in, n_out,
                                                              form.code_bias, cb, form.group_elems,
                                                              form.has_offset ? 1 : 0);
             break;
         case 8:
-            s_gemv_kernel<8><<<(unsigned) blocks, threads>>>(x, codes, scales, offset, y, n_in, n_out,
+            basalt::kernels::launch_cc(s_gemv_kernel<8>, (unsigned) blocks, threads, 0, 0, x, codes, scales, offset, y, n_in, n_out,
                                                              form.code_bias, cb, form.group_elems,
                                                              form.has_offset ? 1 : 0);
             break;
@@ -497,18 +498,15 @@ static void s_gemv_split_impl(const uint16_t* x, const uint8_t* codes, const flo
     const unsigned grid = (unsigned) n_out;
     switch (form.code_bits) {
         case 2:
-            s_gemv_split_kernel<2><<<grid, threads_per_row, smem, stream>>>(
-                x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems,
+            basalt::kernels::launch_cc(s_gemv_split_kernel<2>, grid, threads_per_row, smem, stream, x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems,
                 group_shift, form.has_offset ? 1 : 0, threads_per_row);
             break;
         case 4:
-            s_gemv_split_kernel<4><<<grid, threads_per_row, smem, stream>>>(
-                x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems,
+            basalt::kernels::launch_cc(s_gemv_split_kernel<4>, grid, threads_per_row, smem, stream, x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems,
                 group_shift, form.has_offset ? 1 : 0, threads_per_row);
             break;
         case 8:
-            s_gemv_split_kernel<8><<<grid, threads_per_row, smem, stream>>>(
-                x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems,
+            basalt::kernels::launch_cc(s_gemv_split_kernel<8>, grid, threads_per_row, smem, stream, x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems,
                 group_shift, form.has_offset ? 1 : 0, threads_per_row);
             break;
         default:
@@ -581,12 +579,10 @@ void s_gemv_q8k(const uint8_t* x_q8k, const uint8_t* codes, const float* scales,
     const int ho = form.has_offset ? 1 : 0;
     switch (form.code_bits) {
         case 4:
-            s_gemv_q8k_kernel<4><<<blocks, threads, 0, (cudaStream_t) stream>>>(
-                x_q8k, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems, ho);
+            basalt::kernels::launch_cc(s_gemv_q8k_kernel<4>, blocks, threads, 0, (cudaStream_t) stream, x_q8k, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems, ho);
             break;
         case 8:
-            s_gemv_q8k_kernel<8><<<blocks, threads, 0, (cudaStream_t) stream>>>(
-                x_q8k, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems, ho);
+            basalt::kernels::launch_cc(s_gemv_q8k_kernel<8>, blocks, threads, 0, (cudaStream_t) stream, x_q8k, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems, ho);
             break;
         default:
             // 2-bit S2 never has a Q8_K activation: its `vec_dot_type` is Q8_0.  Refusing is better than
@@ -624,12 +620,10 @@ void s_gemv_q8k_split(const uint8_t* x_q8k, const uint8_t* codes, const float* s
     const int ho = form.has_offset ? 1 : 0;
     switch (form.code_bits) {
         case 4:
-            s_gemv_q8_split_kernel<4, true><<<blocks, threads, 0, (cudaStream_t) stream>>>(
-                x_q8k, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, group_shift, ho);
+            basalt::kernels::launch_cc(s_gemv_q8_split_kernel<4, true>, blocks, threads, 0, (cudaStream_t) stream, x_q8k, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, group_shift, ho);
             break;
         case 8:
-            s_gemv_q8_split_kernel<8, true><<<blocks, threads, 0, (cudaStream_t) stream>>>(
-                x_q8k, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, group_shift, ho);
+            basalt::kernels::launch_cc(s_gemv_q8_split_kernel<8, true>, blocks, threads, 0, (cudaStream_t) stream, x_q8k, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, group_shift, ho);
             break;
         default:
             basalt::log::error("basalt", "s_gemv_q8k_split: code_bits %d has no Q8_K contract", form.code_bits);
@@ -671,12 +665,10 @@ void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float*
     const int ho = form.has_offset ? 1 : 0;
     switch (form.code_bits) {
         case 4:
-            s_gemv_q8_split_kernel<4, false><<<blocks, threads, 0, (cudaStream_t) stream>>>(
-                x_q8_0, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, group_shift, ho);
+            basalt::kernels::launch_cc(s_gemv_q8_split_kernel<4, false>, blocks, threads, 0, (cudaStream_t) stream, x_q8_0, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, group_shift, ho);
             break;
         case 8:
-            s_gemv_q8_split_kernel<8, false><<<blocks, threads, 0, (cudaStream_t) stream>>>(
-                x_q8_0, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, group_shift, ho);
+            basalt::kernels::launch_cc(s_gemv_q8_split_kernel<8, false>, blocks, threads, 0, (cudaStream_t) stream, x_q8_0, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, group_shift, ho);
             break;
         default:
             basalt::log::error("basalt", "s_gemv_q8_0_split: code_bits %d has no Q8_0 contract", form.code_bits);

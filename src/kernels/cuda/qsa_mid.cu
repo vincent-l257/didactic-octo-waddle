@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -164,7 +165,7 @@ void launch_half(const void* w, const void* x, float* y, int n_in, int n_out, in
     static std::atomic<bool> attr[64];
     const int dev = opt_in_device("qsa_qproj_half");
     if (!attr[dev].load(std::memory_order_acquire)) {
-        opt_in_check(cudaFuncSetAttribute(qproj_half_kernel<TYPE>, cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024),
+        opt_in_check(basalt::kernels::cc_func_set_attribute(qproj_half_kernel<TYPE>, cudaFuncAttributeMaxDynamicSharedMemorySize, 99 * 1024),
                      "qsa_qproj_half");
         attr[dev].store(true, std::memory_order_release);
     }

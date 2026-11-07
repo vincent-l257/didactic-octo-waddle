@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -131,7 +132,7 @@ void fused_gdn_conv_l2(float* history, const float* qkv, const float* conv_w, fl
         basalt::log::error("basalt", "fused_gdn_conv_l2: invalid arguments");
         std::exit(1);
     }
-    gdn_conv_l2_kernel<<<(unsigned) (channels / S), S, 0, (cudaStream_t) stream>>>(history, qkv, conv_w, h, qk_heads, eps);
+    basalt::kernels::launch_cc(gdn_conv_l2_kernel, (unsigned) (channels / S), S, 0, (cudaStream_t) stream, history, qkv, conv_w, h, qk_heads, eps);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { basalt::log::error("basalt", "fused_gdn_conv_l2: %s", cudaGetErrorString(e)); std::exit(1); }
 }
@@ -142,7 +143,7 @@ void fused_gdn_ab(const float* x, const uint16_t* w_alpha, const uint16_t* w_bet
         basalt::log::error("basalt", "fused_gdn_ab: invalid arguments");
         std::exit(1);
     }
-    gdn_ab_kernel<<<(unsigned) ((2 * h_v + 7) / 8), 256, 0, (cudaStream_t) stream>>>(x, w_alpha, w_beta, dt, ssm_a, gate,
+    basalt::kernels::launch_cc(gdn_ab_kernel, (unsigned) ((2 * h_v + 7) / 8), 256, 0, (cudaStream_t) stream, x, w_alpha, w_beta, dt, ssm_a, gate,
                                                                                      beta, n_embd, h_v);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { basalt::log::error("basalt", "fused_gdn_ab: %s", cudaGetErrorString(e)); std::exit(1); }
@@ -155,7 +156,7 @@ void fused_gdn_step_norm(float* state, const float* q, const float* k, const flo
         basalt::log::error("basalt", "fused_gdn_step_norm: invalid arguments");
         std::exit(1);
     }
-    gdn_step_norm_kernel<<<(unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream>>>(state, q, k, v, gate, beta, z,
+    basalt::kernels::launch_cc(gdn_step_norm_kernel, (unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream, state, q, k, v, gate, beta, z,
                                                                                    gamma, eps, y, h_k, h_v);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {

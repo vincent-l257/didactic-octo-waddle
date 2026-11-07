@@ -55,6 +55,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -598,8 +599,7 @@ void kv_append_step(uint16_t* k_pool, uint16_t* v_pool, const int32_t* page_tabl
     if (step == nullptr) fail("kv_append: step is null");
     // The grid is the head x dim count, which is a CONSTANT - `kv_append` writes one cell.
     const long long n = s.n_head_kv * s.head_dim;
-    kv_append_kernel<<<grid_for(n, THREADS), THREADS, 0, (cudaStream_t) stream>>>(
-        k_pool, v_pool, page_table, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
+    basalt::kernels::launch_cc(kv_append_kernel, grid_for(n, THREADS), THREADS, 0, (cudaStream_t) stream, k_pool, v_pool, page_table, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
         host ? *host : KvHostPools{});
     check_launch("kv_append");
     if (stream == nullptr) check_sync("kv_append");
@@ -613,8 +613,7 @@ void qsa_index_step(const float* pooled, const float* q_idx, const float* bias, 
     // THE GRID IS `max_blocks`, A CONSTANT - not this token's `n_bid + 1`.  The kernel returns for
     // `b > n_bid`, so the surplus blocks cost a launch and nothing else.
     const int threads = 32 * (int) s.idx_n_head;
-    qsa_index_kernel<<<(unsigned) max_blocks, threads, 0, (cudaStream_t) stream>>>(
-        pooled, q_idx, bias, (int) s.idx_n_head, (int) s.idx_dim, s.idx_block, step, cell_scores);
+    basalt::kernels::launch_cc(qsa_index_kernel, (unsigned) max_blocks, threads, 0, (cudaStream_t) stream, pooled, q_idx, bias, (int) s.idx_n_head, (int) s.idx_dim, s.idx_block, step, cell_scores);
     check_launch("qsa_index");
     if (stream == nullptr) check_sync("qsa_index");
 }
@@ -633,7 +632,7 @@ void topk_512_step(const float* cell_scores, const QsaShapes& s, int64_t cap, co
         std::exit(1);
     }
     // One block, so the launch is already constant; the kernel reads `n_kv` and `width` from `step`.
-    topk_kernel<<<1, TOPK_THREADS, 0, (cudaStream_t) stream>>>(cell_scores, step, ids);
+    basalt::kernels::launch_cc(topk_kernel, 1, TOPK_THREADS, 0, (cudaStream_t) stream, cell_scores, step, ids);
     check_launch("topk_512");
     if (stream == nullptr) check_sync("topk_512");
 }
@@ -647,8 +646,7 @@ void kv_gather_step(const uint16_t* k_pool, const uint16_t* v_pool, const int32_
     // THE GRID IS THE CAPACITY.  The kernel reads the real `n_ids` from `step` and its `if (i >= total) return;`
     // guard leaves the surplus threads idle.
     const long long total = max_ids * s.n_head_kv * (s.head_dim / 4);
-    kv_gather_kernel<<<grid_for(total, 256), 256, 0, (cudaStream_t) stream>>>(
-        k_pool, v_pool, page_table, ids, step, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
+    basalt::kernels::launch_cc(kv_gather_kernel, grid_for(total, 256), 256, 0, (cudaStream_t) stream, k_pool, v_pool, page_table, ids, step, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
         k_scratch, v_scratch);
     check_launch("kv_gather");
     if (stream == nullptr) check_sync("kv_gather");
@@ -680,15 +678,14 @@ void qsa_attend_step(const float* q, const uint16_t* k_scratch, const uint16_t* 
             std::exit(1);
         }
         const cudaError_t e =
-            cudaFuncSetAttribute(qsa_attend_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem);
+            basalt::kernels::cc_func_set_attribute(qsa_attend_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem);
         if (e != cudaSuccess) {
             basalt::log::error("basalt", "qsa: qsa_attend: shared opt-in: %s", cudaGetErrorString(e));
             std::exit(1);
         }
         s_configured = smem;
     }
-    qsa_attend_kernel<<<(unsigned) s.n_head, (unsigned) s.head_dim, smem, (cudaStream_t) stream>>>(
-        q, k_scratch, v_scratch, step, (int) s.n_head, (int) s.n_head_kv, (int) s.head_dim, attn, weights);
+    basalt::kernels::launch_cc(qsa_attend_kernel, (unsigned) s.n_head, (unsigned) s.head_dim, smem, (cudaStream_t) stream, q, k_scratch, v_scratch, step, (int) s.n_head, (int) s.n_head_kv, (int) s.head_dim, attn, weights);
     check_launch("qsa_attend");
     if (stream == nullptr) check_sync("qsa_attend");
 }
@@ -730,8 +727,7 @@ void indexer_key_append(const float* raw, const int32_t* pos_dev, int32_t pos_ba
     // **ONE LAUNCH, NO HOST BRANCH ON THE POSITION.**  The completion rotation is inside the kernel now.  The
     // arguments here are identical for every token, which is the property a CUDA graph needs: this function can
     // be captured and replayed, and the position arrives through `pos_dev` like every other kernel's data.
-    indexer_key_append_kernel<<<1, threads, smem, (cudaStream_t) stream>>>(
-        raw, pos_dev, (int) pos_base, w_k_norm, eps, b.tail, b.dead, b.pooled, b.block_pos, (int) s.idx_dim,
+    basalt::kernels::launch_cc(indexer_key_append_kernel, 1, threads, smem, (cudaStream_t) stream, raw, pos_dev, (int) pos_base, w_k_norm, eps, b.tail, b.dead, b.pooled, b.block_pos, (int) s.idx_dim,
         (int) s.idx_block, (int) s.n_rot, cos_tab, sin_tab, mrope_table());
     check_launch("indexer_key_append");
     if (stream == nullptr) check_sync("indexer_key_append");
@@ -790,7 +786,7 @@ void qsa_attend(const float* q, const uint16_t* k_scratch, const uint16_t* v_scr
 void qsa_gate_apply(const float* attn, const float* q_full, const QsaShapes& s, uint16_t* out, void* stream) {
     validate(s, "qsa_gate_apply");
     const long long n = s.n_head * s.head_dim;
-    qsa_gate_apply_kernel<<<grid_for(n, 256), 256, 0, (cudaStream_t) stream>>>(attn, q_full, (int) s.n_head,
+    basalt::kernels::launch_cc(qsa_gate_apply_kernel, grid_for(n, 256), 256, 0, (cudaStream_t) stream, attn, q_full, (int) s.n_head,
                                                                               (int) s.head_dim, out);
     check_launch("qsa_gate_apply");
     if (stream == nullptr) check_sync("qsa_gate_apply");

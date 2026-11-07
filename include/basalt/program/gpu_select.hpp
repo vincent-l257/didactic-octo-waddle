@@ -35,7 +35,7 @@ struct GpuSpec {
 /// Parses "", "auto" or "A,B,..."; false with `err` naming what is wrong.
 bool parse_gpu_spec(const std::string& text, GpuSpec& out, std::string& err);
 
-/// Whether the card can take part: compute capability 12.0 (main or peer), 8.6 (peer only), or unknown.
+/// Whether the card can take part: compute capability 12.0 (main or peer), 8.6 or 7.0 (not main), or unknown.
 bool gpu_supported(const GpuCard& c);
 
 /// "GPU 1 (RTX 5060 Ti)": the visible number the user types, and the name when known.

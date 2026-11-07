@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::prefill::mmq {
 namespace {
@@ -228,12 +229,12 @@ void gather_native(const void* gate, const void* up, size_t gu_half_bytes, const
                       (uintptr_t) tail | (uintptr_t) tail_dst | gu_half_bytes | d_bytes) % 16 == 0;
     if (a16) {
         const int64_t na = (int64_t) gu_half_bytes / 16, nc = (int64_t) d_bytes / 16;
-        copy16_kernel<<<blocks(2 * na + nc + 1), 256, 0, s>>>((const uint4*) gate, na, (const uint4*) up, na,
+        basalt::kernels::launch_cc(copy16_kernel, blocks(2 * na + nc + 1), 256, 0, s, (const uint4*) gate, na, (const uint4*) up, na,
                                                               (uint4*) gu_dst, (const uint4*) down, nc, (uint4*) d_dst,
                                                               (const uint4*) tail, (uint4*) tail_dst);
     } else {
         const int64_t na = (int64_t) gu_half_bytes, nc = (int64_t) d_bytes;
-        copy1_kernel<<<blocks(2 * na + nc + 16), 256, 0, s>>>((const uint8_t*) gate, na, (const uint8_t*) up, na,
+        basalt::kernels::launch_cc(copy1_kernel, blocks(2 * na + nc + 16), 256, 0, s, (const uint8_t*) gate, na, (const uint8_t*) up, na,
                                                               (uint8_t*) gu_dst, (const uint8_t*) down, nc, (uint8_t*) d_dst,
                                                               (const uint8_t*) tail, (uint8_t*) tail_dst);
     }
@@ -257,14 +258,13 @@ bool gather_native_group(const GatherGroup& g, size_t up_off, size_t gu_half_byt
     ga.tail_off = (int64_t) tail_off / 16;
     ga.tail_dst = (uint4*) tail_dst;
     const int64_t na = (int64_t) gu_half_bytes / 16, nc = (int64_t) d_bytes / 16;
-    copy16_group_kernel<<<dim3(blocks(2 * na + nc + 1), (unsigned) (g.n - g.first)), 256, 0, (cudaStream_t) stream>>>(
-        ga, g.first, na, nc, (uint4*) gu_dst, (uint4*) d_dst);
+    basalt::kernels::launch_cc(copy16_group_kernel, dim3(blocks(2 * na + nc + 1), (unsigned) (g.n - g.first)), 256, 0, (cudaStream_t) stream, ga, g.first, na, nc, (uint4*) gu_dst, (uint4*) d_dst);
     ck(cudaGetLastError(), "gather_native_group");
     return true;
 }
 
 void gather_q2(const uint8_t* blob, void* gu_dst, void* d_dst, void* stream) {
-    q2_kernel<<<blocks(1280LL * 40 + 2560LL * 10), 256, 0, (cudaStream_t) stream>>>(blob, (uint16_t*) gu_dst,
+    basalt::kernels::launch_cc(q2_kernel, blocks(1280LL * 40 + 2560LL * 10), 256, 0, (cudaStream_t) stream, blob, (uint16_t*) gu_dst,
                                                                                          (uint16_t*) d_dst);
     ck(cudaGetLastError(), "gather_q2");
 }
@@ -273,14 +273,14 @@ void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interlea
             const int32_t* bounds, int n) {
     if (rows <= 0) return;
     if (bounds == nullptr || n <= 0) tail = nullptr;
-    swiglu_kernel<<<blocks(rows * n_ff), 256, 0, (cudaStream_t) stream>>>(gu, h, rows, n_ff, interleaved,
+    basalt::kernels::launch_cc(swiglu_kernel, blocks(rows * n_ff), 256, 0, (cudaStream_t) stream, gu, h, rows, n_ff, interleaved,
                                                                            (const float4*) tail, bounds, n);
     ck(cudaGetLastError(), "swiglu");
 }
 
 void iota(int32_t* dst, int64_t n, void* stream) {
     if (n <= 0) return;
-    iota_kernel<<<blocks(n), 256, 0, (cudaStream_t) stream>>>(dst, n);
+    basalt::kernels::launch_cc(iota_kernel, blocks(n), 256, 0, (cudaStream_t) stream, dst, n);
     ck(cudaGetLastError(), "iota");
 }
 

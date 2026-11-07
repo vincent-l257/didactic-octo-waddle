@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace {
 
@@ -229,13 +230,13 @@ struct Inputs {
         z = dalloc<float>((size_t) T * HV * S);
         gamma = dalloc<float>(S);
         state0 = dalloc<float>((size_t) S * HV * S);
-        fill_gauss<<<4096, 256>>>(h, T * C, 1.0f, seed);
+        basalt::kernels::launch_cc(fill_gauss, 4096, 256, 0, 0, h, T * C, 1.0f, seed);
         ck(cudaMemcpy(hn, h, (size_t) T * C * 4, cudaMemcpyDeviceToDevice), "copy");
-        gdn_l2_kernel<<<dim3(2 * HK, (unsigned) T), S>>>(hn, EPS);   // what the old kernel read
-        fill_gates<<<1024, 256>>>(gate, beta, T * HV, seed + 1, mode);
-        fill_gauss<<<4096, 256>>>(z, T * HV * S, 1.0f, seed + 2);
-        fill_gauss<<<1, 128>>>(gamma, S, 0.1f, seed + 3, 1.0f);
-        fill_gauss<<<1024, 256>>>(state0, (int64_t) S * HV * S, 0.05f, seed + 4);
+        basalt::kernels::launch_cc(gdn_l2_kernel, dim3(2 * HK, (unsigned) T), S, 0, 0, hn, EPS);   // what the old kernel read
+        basalt::kernels::launch_cc(fill_gates, 1024, 256, 0, 0, gate, beta, T * HV, seed + 1, mode);
+        basalt::kernels::launch_cc(fill_gauss, 4096, 256, 0, 0, z, T * HV * S, 1.0f, seed + 2);
+        basalt::kernels::launch_cc(fill_gauss, 1, 128, 0, 0, gamma, S, 0.1f, seed + 3, 1.0f);
+        basalt::kernels::launch_cc(fill_gauss, 1024, 256, 0, 0, state0, (int64_t) S * HV * S, 0.05f, seed + 4);
         ck(cudaDeviceSynchronize(), "inputs");
     }
     ~Inputs() { cudaFree(h); cudaFree(hn); cudaFree(gate); cudaFree(beta); cudaFree(z); cudaFree(gamma); cudaFree(state0); }
@@ -255,8 +256,8 @@ struct Bufs {
 };
 void run_old(const Inputs& in, Bufs& b, int64_t T) {
     ck(cudaMemcpy(b.state, in.state0, (size_t) S * HV * S * 4, cudaMemcpyDeviceToDevice), "state");
-    gdn_rec_wl_kernel<<<HK * GDN_WNCB, GDN_WC * 8>>>(b.state, in.hn, in.gate, in.beta, b.y, T);
-    gdn_out_norm_kernel<<<dim3((unsigned) T, HV), S>>>(in.z, in.gamma, EPS, b.y, b.y16);
+    basalt::kernels::launch_cc(gdn_rec_wl_kernel, HK * GDN_WNCB, GDN_WC * 8, 0, 0, b.state, in.hn, in.gate, in.beta, b.y, T);
+    basalt::kernels::launch_cc(gdn_out_norm_kernel, dim3((unsigned) T, HV), S, 0, 0, in.z, in.gamma, EPS, b.y, b.y16);
 }
 void run_new(const Inputs& in, Bufs& b, int64_t T) {
     ck(cudaMemcpy(b.state, in.state0, (size_t) S * HV * S * 4, cudaMemcpyDeviceToDevice), "state");
@@ -399,9 +400,9 @@ void bench(int64_t T) {
             if (v == 0) ck(cudaMemcpy(in.hn, in.h, (size_t) T * C * 4, cudaMemcpyDeviceToDevice), "copy");
             cudaEventRecord(e0);
             if (v == 0) {   // the old path: the norm pass, the recurrence, the output norm
-                gdn_l2_kernel<<<dim3(2 * HK, (unsigned) T), S>>>(in.hn, EPS);
-                gdn_rec_wl_kernel<<<HK * GDN_WNCB, GDN_WC * 8>>>(b.state, in.hn, in.gate, in.beta, b.y, T);
-                gdn_out_norm_kernel<<<dim3((unsigned) T, HV), S>>>(in.z, in.gamma, EPS, b.y, b.y16);
+                basalt::kernels::launch_cc(gdn_l2_kernel, dim3(2 * HK, (unsigned) T), S, 0, 0, in.hn, EPS);
+                basalt::kernels::launch_cc(gdn_rec_wl_kernel, HK * GDN_WNCB, GDN_WC * 8, 0, 0, b.state, in.hn, in.gate, in.beta, b.y, T);
+                basalt::kernels::launch_cc(gdn_out_norm_kernel, dim3((unsigned) T, HV), S, 0, 0, in.z, in.gamma, EPS, b.y, b.y16);
             } else {
                 basalt::prefill::gdn_recurrence(b.state, in.h, in.gate, in.beta, in.z, in.gamma, EPS, b.work, b.y, b.y16, T,
                                                 nullptr);

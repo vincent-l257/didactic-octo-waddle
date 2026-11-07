@@ -1,5 +1,6 @@
 // src/kernels/cuda/qsa_dec_attn.cu - see include/basalt/kernels/qsa_dec_attn.hpp.
 #include "basalt/kernels/qsa_dec_attn.hpp"
+#include "basalt/kernels/sm70_emu.cuh"
 #include "basalt/kernels/qsa_seg.hpp"
 #include "basalt/kernels/kv_q8.hpp"
 #include "basalt/kernels/packed_byte.hpp"
@@ -15,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 // `ushort` comes from the POSIX sys/types.h where there is one; redeclaring the same type is harmless.
 using ushort = unsigned short;
@@ -79,13 +81,25 @@ __device__ __forceinline__ int head_of_lane(int lane) {
 
 __device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
     const unsigned s = (unsigned) __cvta_generic_to_shared(smem);
+#if BASALT_SM80
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(gmem));
+#else
+    basalt::v70::copy<16>(s, gmem);
+#endif
 }
 __device__ __forceinline__ void cp_async8(void* smem, const void* gmem) {
     const unsigned s = (unsigned) __cvta_generic_to_shared(smem);
+#if BASALT_SM80
     asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"(s), "l"(gmem));
+#else
+    basalt::v70::copy<8>(s, gmem);
+#endif
 }
-__device__ __forceinline__ void cp_async_wait_all() { asm volatile("cp.async.commit_group;\ncp.async.wait_group 0;\n" ::); }
+__device__ __forceinline__ void cp_async_wait_all() {
+#if BASALT_SM80
+    asm volatile("cp.async.commit_group;\ncp.async.wait_group 0;\n" ::);
+#endif
+}
 
 // shared memory of one chunk block; KV_MODE 0: fp16 rows, 1: int8 rows + fp16 scales
 template <int KV_MODE> struct ChunkSmem {
@@ -450,12 +464,22 @@ __device__ __forceinline__ uint32_t pack_h2(float a, float b) {
     return *reinterpret_cast<const uint32_t*>(&h);
 }
 __device__ __forceinline__ void mma_16816(float* d, const uint32_t* a, uint32_t b0, uint32_t b1) {
+#if BASALT_SM80
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
                  : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#else
+    const uint32_t b[2] = {b0, b1};
+    basalt::v70::mma_16816<false>(d, a, b);
+#endif
 }
+#if BASALT_SM80
 __device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
 template <int N> __device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+#else
+__device__ __forceinline__ void cp_async_commit() {}
+template <int N> __device__ __forceinline__ void cp_async_wait() {}
+#endif
 
 __global__ void __launch_bounds__(DTHREADS) draft_attn_chunk(AttnArgs a) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
@@ -732,8 +756,8 @@ template <int MODE> void opt_in(void (*kernel)(AttnArgs), size_t bytes) {
     static std::atomic<bool> done[64];
     const int dev = opt_in_device("qsa_dec_attn");
     if (!done[dev].load(std::memory_order_acquire)) {
-        opt_in_check(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) bytes), "qsa_dec_attn");
-        cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);   // a hint
+        opt_in_check(basalt::kernels::cc_func_set_attribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) bytes), "qsa_dec_attn");
+        basalt::kernels::cc_func_set_attribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);   // a hint
         done[dev].store(true, std::memory_order_release);
     }
 }
@@ -772,9 +796,9 @@ void qsa_dec_attn(const float* q, const QsaAttnPools& pools, const int32_t* ids,
         static std::atomic<bool> done[64];
         const int dev = opt_in_device("draft_attn");
         if (!done[dev].load(std::memory_order_acquire)) {
-            opt_in_check(cudaFuncSetAttribute(draft_attn_chunk, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) bytes),
+            opt_in_check(basalt::kernels::cc_func_set_attribute(draft_attn_chunk, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) bytes),
                          "draft_attn");
-            cudaFuncSetAttribute(draft_attn_chunk, cudaFuncAttributePreferredSharedMemoryCarveout, 100);   // a hint
+            basalt::kernels::cc_func_set_attribute(draft_attn_chunk, cudaFuncAttributePreferredSharedMemoryCarveout, 100);   // a hint
             done[dev].store(true, std::memory_order_release);
         }
         launch_pdl(draft_attn_chunk, dim3((unsigned) a.n_chunks, (unsigned) s.n_head_kv, 1u), dim3(DTHREADS), bytes, st, a);

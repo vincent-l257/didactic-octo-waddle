@@ -19,11 +19,13 @@
 // SOFTWARE.
 
 #include "basalt/kernels/native_qsa_score.hpp"
+#include "basalt/kernels/sm70_emu.cuh"
 #include <cuda_runtime.h>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -34,19 +36,31 @@ struct TileB { uint32_t x[2]; };
 struct TileC { float x[4]={0.0f,0.0f,0.0f,0.0f}; };
 __device__ __forceinline__ void load_a(TileA& a,const float* p) {
     const float* src=p+(threadIdx.x%16)*STRIDE+(threadIdx.x/16)*4;
+#if BASALT_SM80
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.b16 {%0,%1,%2,%3}, [%4];"
         : "=r"(a.x[0]),"=r"(a.x[1]),"=r"(a.x[2]),"=r"(a.x[3]):"l"(src));
+#else
+    basalt::v70::ldmatrix<4>(a.x, src);
+#endif
 }
 __device__ __forceinline__ void load_b(TileB& b,const float* p) {
     const float* src=p+(threadIdx.x%8)*STRIDE+((threadIdx.x/8)*4)%8;
+#if BASALT_SM80
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.b16 {%0,%1}, [%2];"
         : "=r"(b.x[0]),"=r"(b.x[1]):"l"(src));
+#else
+    basalt::v70::ldmatrix<2>(b.x, src);
+#endif
 }
 __device__ __forceinline__ void mma(TileC& c,const TileA& a,const TileB& b) {
     // Deliberately no cvt.rn.tf32: pinned mma.cuh passes raw F32 bits directly.
+#if BASALT_SM80
     asm("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
         : "+f"(c.x[0]),"+f"(c.x[1]),"+f"(c.x[2]),"+f"(c.x[3])
         : "r"(a.x[0]),"r"(a.x[1]),"r"(a.x[2]),"r"(a.x[3]),"r"(b.x[0]),"r"(b.x[1]));
+#else
+    basalt::v70::mma_tf32_1688(c.x, a.x, b.x);
+#endif
 }
 __global__ __launch_bounds__(64,1) void score_kernel(
         const float* __restrict__ pooled,const float* __restrict__ query,
@@ -143,8 +157,7 @@ void native_qsa_score(const float* pooled,const float* query,const float* bias,
     for(int i=0;i<count;++i)validate(spans[i]);
     for(int i=0;i<count;++i)for(int j=i+1;j<count;++j)
         if(overlaps(spans[i],spans[j]))throw std::invalid_argument("native QSA score spans overlap");
-    score_kernel<<<unsigned((max_blocks+ROWS-1)/ROWS),dim3(32,WARPS),0,static_cast<cudaStream_t>(stream)>>>(
-        pooled,query,bias,step,int(max_cells),cells);
+    basalt::kernels::launch_cc(score_kernel, unsigned((max_blocks+ROWS-1)/ROWS), dim3(32,WARPS), 0, static_cast<cudaStream_t>(stream), pooled,query,bias,step,int(max_cells),cells);
     const auto error=cudaGetLastError();
     if(error!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(error));
 }

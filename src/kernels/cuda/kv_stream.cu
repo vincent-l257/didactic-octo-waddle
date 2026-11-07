@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -198,7 +199,7 @@ uint64_t kv_block_bytes(const QsaShapes& s, int fmt) {
 }
 
 void kv_stream_reset(const KvStreamMap& m, void* stream) {
-    reset_kernel<<<128, 256, 0, (cudaStream_t) stream>>>(m);
+    basalt::kernels::launch_cc(reset_kernel, 128, 256, 0, (cudaStream_t) stream, m);
     check("reset");
 }
 
@@ -218,14 +219,14 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
                              "slot twice", (long long) m.n_slots, RT);
         std::exit(1);
     }
-    resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
+    basalt::kernels::launch_cc(resolve_kernel, 1, RT, 0, (cudaStream_t) stream, m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
     check("resolve");
-    copy_kernel<<<96, 128, 0, (cudaStream_t) stream>>>(m, runs_of(slots, host, fmt, s));
+    basalt::kernels::launch_cc(copy_kernel, 96, 128, 0, (cudaStream_t) stream, m, runs_of(slots, host, fmt, s));
     check("copy");
 }
 
 void kv_ring_table(int32_t* page_table, int64_t n_blocks, int64_t n_slots, void* stream) {
-    ring_kernel<<<64, 256, 0, (cudaStream_t) stream>>>(page_table, n_blocks, n_slots);
+    basalt::kernels::launch_cc(ring_kernel, 64, 256, 0, (cudaStream_t) stream, page_table, n_blocks, n_slots);
     check("ring table");
 }
 

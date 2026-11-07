@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -53,7 +54,7 @@ void s2_gemv(const uint16_t* x, const uint8_t* codes, const float* scales, float
     }
     const int threads = 128;
     const long long blocks = (n_out + threads - 1) / threads;
-    s2_gemv_kernel<<<(unsigned) blocks, threads>>>(x, codes, scales, y, n_in, n_out);
+    basalt::kernels::launch_cc(s2_gemv_kernel, (unsigned) blocks, threads, 0, 0, x, codes, scales, y, n_in, n_out);
     const cudaError_t e = cudaDeviceSynchronize();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "s2_gemv: %s", cudaGetErrorString(e));

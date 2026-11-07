@@ -135,9 +135,11 @@ bool parse_gpu_spec(const std::string& text, GpuSpec& out, std::string& err) {
 
 static bool gpu_main(const GpuCard& c) { return c.cc_major == 0 || (c.cc_major == 12 && c.cc_minor == 0); }
 
-static bool gpu_ampere_peer(const GpuCard& c) { return c.cc_major == 8 && c.cc_minor == 6; }
+static bool gpu_side_card(const GpuCard& c) {
+    return (c.cc_major == 8 && c.cc_minor == 6) || (c.cc_major == 7 && c.cc_minor == 0);
+}
 
-bool gpu_supported(const GpuCard& c) { return gpu_main(c) || gpu_ampere_peer(c); }
+bool gpu_supported(const GpuCard& c) { return gpu_main(c) || gpu_side_card(c); }
 
 std::string gpu_label(const std::vector<GpuCard>& visible, int index) {
     std::string s = "GPU " + std::to_string(index);
@@ -161,7 +163,7 @@ GpuChoice choose_gpus(const GpuSpec& spec, const std::vector<GpuCard>& visible, 
         std::vector<int> mains, peers;
         for (int i = 0; i < n; ++i) {
             if (gpu_main(visible[(size_t) i])) mains.push_back(i);
-            else if (gpu_ampere_peer(visible[(size_t) i])) peers.push_back(i);
+            else if (gpu_side_card(visible[(size_t) i])) peers.push_back(i);
             else c.notes.push_back("gpu auto: " + gpu_label(visible, i) + " skipped, not sm_120");
         }
         if (mains.empty()) {

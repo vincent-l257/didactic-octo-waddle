@@ -28,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -63,7 +64,7 @@ void ple_history_advance(float* hist, const float* normalized, void* stream) {
     if (overlap(hist, (size_t) NG_HIST * NG_HC_DIM * sizeof(float),
                 normalized, (size_t) NG_HC_DIM * sizeof(float)))
         throw std::invalid_argument("ple_history_advance: history and normalized input overlap");
-    history_advance_kernel<<<(NG_HC_DIM + THREADS - 1) / THREADS, THREADS, 0, (cudaStream_t) stream>>>(hist, normalized);
+    basalt::kernels::launch_cc(history_advance_kernel, (NG_HC_DIM + THREADS - 1) / THREADS, THREADS, 0, (cudaStream_t) stream, hist, normalized);
     ck(cudaGetLastError(), "history advance launch");
 }
 

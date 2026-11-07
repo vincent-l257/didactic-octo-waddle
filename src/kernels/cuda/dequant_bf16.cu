@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -219,8 +220,8 @@ void launch(int type, const void* blocks, int64_t row0, int64_t rows, int64_t co
     cudaStream_t st = (cudaStream_t) stream;
 const bool vec = (reinterpret_cast<uintptr_t>(out) & 15) == 0;
 #define DEQUANT_CASE(TY) \
-    if (vec) dequant_kernel<TY, T, true><<<grid, 256, 0, st>>>(p, row_bytes, row0, rows, gpr, out); \
-    else dequant_kernel<TY, T, false><<<grid, 256, 0, st>>>(p, row_bytes, row0, rows, gpr, out); \
+    if (vec) basalt::kernels::launch_cc(dequant_kernel<TY, T, true>, grid, 256, 0, st, p, row_bytes, row0, rows, gpr, out); \
+    else basalt::kernels::launch_cc(dequant_kernel<TY, T, false>, grid, 256, 0, st, p, row_bytes, row0, rows, gpr, out); \
     break
     switch (type) {
     case 2: DEQUANT_CASE(2);

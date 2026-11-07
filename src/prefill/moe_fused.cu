@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <mutex>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::prefill::fused {
 namespace {
@@ -373,17 +374,17 @@ const DevInfo& dev_info() {
     if (d.cc < 80) return d;
     // the device code of this card's arch must have the kernels (a build without a tensor-core target has an empty body)
     cudaFuncAttributes fa{};
-    if (cudaFuncGetAttributes(&fa, expert_kernel<true>) != cudaSuccess || fa.ptxVersion < 80) {
+    if (basalt::kernels::cc_func_get_attributes(&fa, expert_kernel<true>) != cudaSuccess || fa.ptxVersion < 80) {
         cudaGetLastError();
         d.cc = 0;
         return d;
     }
-    ck(cudaFuncSetAttribute(expert_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem_bytes(true)),
+    ck(basalt::kernels::cc_func_set_attribute(expert_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem_bytes(true)),
        "smem gu");
-    ck(cudaFuncSetAttribute(expert_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem_bytes(false)),
+    ck(basalt::kernels::cc_func_set_attribute(expert_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem_bytes(false)),
        "smem down");
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&d.occ_gu, expert_kernel<true>, THREADS, smem_bytes(true));
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&d.occ_d, expert_kernel<false>, THREADS, smem_bytes(false));
+    basalt::kernels::cc_occupancy(&d.occ_gu, expert_kernel<true>, THREADS, smem_bytes(true));
+    basalt::kernels::cc_occupancy(&d.occ_d, expert_kernel<false>, THREADS, smem_bytes(false));
     if (d.occ_gu < 1 || d.occ_d < 1) d.cc = 0;                   // does not fit this card: the MMQ path
     cudaGetLastError();
     return d;
@@ -405,7 +406,7 @@ size_t group_bytes(int64_t n, int n_expert) {   // + 64: moe_fused_iq.cu's v2 it
 void quantize_act(const float* x, int64_t rows, int64_t cols, void* xa, void* stream) {
     if (rows <= 0) return;
     const int64_t nblk = rows * (cols / 64);
-    quant_act_kernel<<<blocks(nblk, 8), 256, 0, (cudaStream_t) stream>>>(x, nblk, (uint8_t*) xa);
+    basalt::kernels::launch_cc(quant_act_kernel, blocks(nblk, 8), 256, 0, (cudaStream_t) stream, x, nblk, (uint8_t*) xa);
     ck(cudaGetLastError(), "quantize_act");
 }
 
@@ -420,10 +421,10 @@ void group(const int32_t* ids, int64_t n, int k, int n_expert, void* scratch, in
     ck(cudaMemsetAsync(tb.cnt, 0, (size_t) n_expert * 4, s), "group memset");
     if (n > 0) {
         const unsigned nb = std::min<unsigned>(blocks(n, 1024), 4u * (unsigned) std::max(dev_info().sms, 1));
-        count_kernel<<<nb, 1024, (size_t) n_expert * 4, s>>>(ids, n, n_expert, tb.cnt);
+        basalt::kernels::launch_cc(count_kernel, nb, 1024, (size_t) n_expert * 4, s, ids, n, n_expert, tb.cnt);
     }
-    scan_kernel<<<1, (unsigned) ((n_expert + 31) / 32 * 32), 0, s>>>(tb, n_expert);
-    if (n > 0) place_kernel<<<blocks(n, 256), 256, 0, s>>>(ids, n, k, n_expert, tb, slot, src);
+    basalt::kernels::launch_cc(scan_kernel, 1, (unsigned) ((n_expert + 31) / 32 * 32), 0, s, tb, n_expert);
+    if (n > 0) basalt::kernels::launch_cc(place_kernel, blocks(n, 256), 256, 0, s, ids, n, k, n_expert, tb, slot, src);
     ck(cudaGetLastError(), "group");
 }
 
@@ -437,9 +438,9 @@ void experts(const Batch& b, int n_expert, int64_t n, const void* scratch, const
     const int64_t tiles = (n + kTileRows - 1) / kTileRows + (b.e1 - b.e0);
     const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * 5, (int64_t) d.sms * d.occ_gu);
     const unsigned g_d = (unsigned) std::min<int64_t>(tiles * 10, (int64_t) d.sms * d.occ_d);
-    expert_kernel<true><<<g_gu, THREADS, smem_bytes(true), s>>>(b, tb, (const uint8_t*) xa, src, (uint8_t*) ha,
+    basalt::kernels::launch_cc(expert_kernel<true>, g_gu, THREADS, smem_bytes(true), s, b, tb, (const uint8_t*) xa, src, (uint8_t*) ha,
                                                                 nullptr);
-    expert_kernel<false><<<g_d, THREADS, smem_bytes(false), s>>>(b, tb, (const uint8_t*) ha, src, nullptr, dm);
+    basalt::kernels::launch_cc(expert_kernel<false>, g_d, THREADS, smem_bytes(false), s, b, tb, (const uint8_t*) ha, src, nullptr, dm);
     ck(cudaGetLastError(), "experts");
 }
 

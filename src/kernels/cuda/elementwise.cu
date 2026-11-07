@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -135,8 +136,7 @@ void embedding_gather(const uint8_t* codes, const float* scales, const float* of
                       int64_t n, int code_bits, int code_bias, int group_elems,
                       float* out, void* stream) {
     if (n <= 0) return;
-    embedding_gather_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(
-        codes, scales, offsets, n, code_bits, code_bias, group_elems, out);
+    basalt::kernels::launch_cc(embedding_gather_kernel, grid_for(n), THREADS, 0, (cudaStream_t) stream, codes, scales, offsets, n, code_bits, code_bias, group_elems, out);
     check_launch("embedding_gather");
 }
 
@@ -144,42 +144,42 @@ void gdn_gate(const float* alpha, const float* dt, const float* ssm_a, float* ga
               int64_t h_v, void* stream) {
     if (n_tokens <= 0 || h_v <= 0) return;
     const int64_t n = n_tokens * h_v;
-    gdn_gate_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(alpha, dt, ssm_a, gate, h_v);
+    basalt::kernels::launch_cc(gdn_gate_kernel, grid_for(n), THREADS, 0, (cudaStream_t) stream, alpha, dt, ssm_a, gate, h_v);
     check_launch("gdn_gate");
     sync_if_needed(stream, "gdn_gate");
 }
 
 void scale_inplace(float* x, int64_t n, float s, void* stream) {
     if (n <= 0) return;
-    scale_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(x, n, s);
+    basalt::kernels::launch_cc(scale_kernel, grid_for(n), THREADS, 0, (cudaStream_t) stream, x, n, s);
     check_launch("scale_inplace");
     sync_if_needed(stream, "scale_inplace");
 }
 
 void add_inplace(float* dst, const float* src, int64_t n, void* stream) {
     if (n <= 0) return;
-    add_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(dst, src, n);
+    basalt::kernels::launch_cc(add_kernel, grid_for(n), THREADS, 0, (cudaStream_t) stream, dst, src, n);
     check_launch("add_inplace");
     sync_if_needed(stream, "add_inplace");
 }
 
 void f32_to_f16_bulk(const float* x, uint16_t* y, int64_t n, void* stream) {
     if (n <= 0) return;
-    to_f16_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(x, y, n);
+    basalt::kernels::launch_cc(to_f16_kernel, grid_for(n), THREADS, 0, (cudaStream_t) stream, x, y, n);
     check_launch("f32_to_f16_bulk");
     sync_if_needed(stream, "f32_to_f16_bulk");
 }
 
 void f32_to_bf16_bulk(const float* x, uint16_t* y, int64_t n, void* stream) {
     if (n <= 0) return;
-    to_bf16_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(x, y, n);
+    basalt::kernels::launch_cc(to_bf16_kernel, grid_for(n), THREADS, 0, (cudaStream_t) stream, x, y, n);
     check_launch("f32_to_bf16_bulk");
     sync_if_needed(stream, "f32_to_bf16_bulk");
 }
 
 void silu_inplace(float* x, int64_t n, void* stream) {
     if (n <= 0) return;
-    silu_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(x, n);
+    basalt::kernels::launch_cc(silu_kernel, grid_for(n), THREADS, 0, (cudaStream_t) stream, x, n);
     check_launch("silu_inplace");
     sync_if_needed(stream, "silu_inplace");
 }
@@ -192,7 +192,7 @@ __global__ void doorbell_wait_kernel(const volatile uint32_t* flag, const volati
 
 void doorbell_wait(const uint32_t* d_flag, const uint32_t* d_seq, void* stream) {
     if (d_flag == nullptr || d_seq == nullptr) return;
-    doorbell_wait_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(d_flag, d_seq);
+    basalt::kernels::launch_cc(doorbell_wait_kernel, 1, 1, 0, (cudaStream_t) stream, d_flag, d_seq);
     check_launch("doorbell_wait");
 }
 
@@ -239,7 +239,7 @@ void scatter_rows_f32(const float* src, float* dst, const int32_t* rows, int64_t
         basalt::log::error("basalt", "scatter_rows_f32: width must be a multiple of 4 and both pointers 16-byte aligned");
         std::exit(1);
     }
-    scatter_rows_kernel<<<(unsigned) n, 128, 0, (cudaStream_t) stream>>>((const float4*) src, (float4*) dst, rows, width / 4);
+    basalt::kernels::launch_cc(scatter_rows_kernel, (unsigned) n, 128, 0, (cudaStream_t) stream, (const float4*) src, (float4*) dst, rows, width / 4);
 }
 void copy_rows_from_mapped(float* dst, const float* src, int64_t rows, int64_t width, const int32_t* hit_rows,
                            const int32_t* count, void* stream) {
@@ -248,7 +248,7 @@ void copy_rows_from_mapped(float* dst, const float* src, int64_t rows, int64_t w
         basalt::log::error("basalt", "copy_rows_from_mapped: width must be a multiple of 4 and both pointers 16-byte aligned");
         std::exit(1);
     }
-    copy_rows_from_mapped_kernel<<<(unsigned) rows, 128, 0, (cudaStream_t) stream>>>((float4*) dst, (const volatile float4*) src,
+    basalt::kernels::launch_cc(copy_rows_from_mapped_kernel, (unsigned) rows, 128, 0, (cudaStream_t) stream, (float4*) dst, (const volatile float4*) src,
                                                                                   width / 4, hit_rows, count);
 }
 void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream) {
@@ -259,7 +259,7 @@ void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream) {
     }
     const int64_t n4 = n / 4;
     const int blocks = (int) ((n4 + 255) / 256 < 64 ? (n4 + 255) / 256 : 64);
-    copy_from_mapped_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>((float4*) dst, (const volatile float4*) src, n4);
+    basalt::kernels::launch_cc(copy_from_mapped_kernel, blocks, 256, 0, (cudaStream_t) stream, (float4*) dst, (const volatile float4*) src, n4);
     check_launch("copy_from_mapped");
 }
 
@@ -319,14 +319,14 @@ void doorbell_publish_value(const float* x, const int32_t* ids, const float* wei
                             float* x_out, int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value,
                             void* stream) {
     if (k > 1024) { basalt::log::error("basalt", "doorbell_publish: k too large"); std::exit(1); }
-    doorbell_publish_value_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(x, ids, weights, (int) n, (int) k, x_out,
+    basalt::kernels::launch_cc(doorbell_publish_value_kernel, 1, 1024, 0, (cudaStream_t) stream, x, ids, weights, (int) n, (int) k, x_out,
                                                                           ids_out, weights_out, d_seq, value);
 }
 
 void doorbell_publish(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
                       int32_t* ids_out, float* weights_out, uint32_t* d_seq, void* stream) {
     if (k > 1024) { basalt::log::error("basalt", "doorbell_publish: k too large"); std::exit(1); }
-    doorbell_publish_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(x, ids, weights, (int) n, (int) k, x_out, ids_out,
+    basalt::kernels::launch_cc(doorbell_publish_kernel, 1, 1024, 0, (cudaStream_t) stream, x, ids, weights, (int) n, (int) k, x_out, ids_out,
                                                                     weights_out, d_seq);
     check_launch("doorbell_publish");
 }
@@ -334,7 +334,7 @@ void doorbell_publish(const float* x, const int32_t* ids, const float* weights, 
 void doorbell_publish_res(const float* x, const int32_t* ids, const int32_t* d_res, int n_expert, int64_t n, int64_t k,
                           float* x_out, int32_t* ids_out, uint32_t* d_seq, void* stream) {
     if (k > 1024) { basalt::log::error("basalt", "doorbell_publish_res: k too large"); std::exit(1); }
-    doorbell_publish_res_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(x, ids, d_res, n_expert, (int) n, (int) k,
+    basalt::kernels::launch_cc(doorbell_publish_res_kernel, 1, 1024, 0, (cudaStream_t) stream, x, ids, d_res, n_expert, (int) n, (int) k,
                                                                         x_out, ids_out, d_seq);
     check_launch("doorbell_publish_res");
 }
@@ -345,7 +345,7 @@ __global__ void copy_i32_from_mapped_kernel(int32_t* __restrict__ dst, const vol
 
 void copy_i32_from_mapped(int32_t* dst, const int32_t* src, int64_t n, void* stream) {
     if (n <= 0) return;
-    copy_i32_from_mapped_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(dst, (const volatile int32_t*) src, (int) n);
+    basalt::kernels::launch_cc(copy_i32_from_mapped_kernel, 1, 128, 0, (cudaStream_t) stream, dst, (const volatile int32_t*) src, (int) n);
     check_launch("copy_i32_from_mapped");
 }
 
@@ -363,8 +363,7 @@ void copy_i32x3_from_mapped(int32_t* d0, const int32_t* s0, int64_t n0, int32_t*
                             int32_t* d2, const int32_t* s2, int64_t n2, void* stream) {
     const int64_t n = n0 + n1 + n2;
     if (n <= 0) return;
-    copy_i32x3_from_mapped_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, (cudaStream_t) stream>>>(
-        d0, (const volatile int32_t*) s0, (int) n0, d1, (const volatile int32_t*) s1, (int) n1, d2,
+    basalt::kernels::launch_cc(copy_i32x3_from_mapped_kernel, (unsigned) ((n + 255) / 256), 256, 0, (cudaStream_t) stream, d0, (const volatile int32_t*) s0, (int) n0, d1, (const volatile int32_t*) s1, (int) n1, d2,
         (const volatile int32_t*) s2, (int) n2);
     check_launch("copy_i32x3_from_mapped");
 }
@@ -375,7 +374,7 @@ void rms_norm_weighted(float* x, const float* w, int64_t rows, int64_t cols, flo
     // launching a block per row for a 2-row call.
     const unsigned warps_per_block = 4;
     const unsigned grid = (unsigned) ((rows + warps_per_block - 1) / warps_per_block);
-    rms_norm_weighted_kernel<<<grid, warps_per_block * 32, 0, (cudaStream_t) stream>>>(x, w, rows, cols, eps);
+    basalt::kernels::launch_cc(rms_norm_weighted_kernel, grid, warps_per_block * 32, 0, (cudaStream_t) stream, x, w, rows, cols, eps);
     check_launch("rms_norm_weighted");
     sync_if_needed(stream, "rms_norm_weighted");
 }

@@ -37,6 +37,7 @@
 #include <mutex>
 #include <vector>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -1264,6 +1265,67 @@ int2* split_scratch(void* stream, size_t entries, unsigned** done) {
 constexpr int kWideBlockSpan = 4096;   // logits per block of the key pass (its penalty bitmap: 512 bytes)
 constexpr int kWideKeyThreads = 256;
 constexpr int kWideChunks = 1024;      // chunks of a list's sums: 32 blocks of 32 threads, one chunk each
+// cc 7.0 has no image of CUB's sort kernels (CUB launches them itself): an LSD radix sort of one row per block,
+// 4 bits a pass. Thread t owns a contiguous segment, so counting digit-major then thread-minor and scattering each
+// segment in order is stable, as SortPairs is. Eight passes end in the input buffers; the last step copies out.
+constexpr int kV70SortThreads = 1024;
+constexpr size_t kV70SortSmem = 16 * kV70SortThreads * sizeof(unsigned);
+
+__global__ void __launch_bounds__(kV70SortThreads) v70_sort_pairs_kernel(unsigned* keys_a, int* ids_a,
+                                                                         unsigned* keys_b, int* ids_b, int n) {
+    extern __shared__ unsigned cnt[];   // [16][kV70SortThreads]
+    __shared__ unsigned warp_sum[32];
+    const size_t row = (size_t) blockIdx.x * n;
+    unsigned* ka = keys_a + row;
+    int* ia = ids_a + row;
+    unsigned* kb = keys_b + row;
+    int* ib = ids_b + row;
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const int seg = (n + kV70SortThreads - 1) / kV70SortThreads;
+    const int lo = min(n, t * seg), hi = min(n, lo + seg);
+    for (int pass = 0; pass < 8; ++pass) {
+        const int sh = pass * 4;
+        const unsigned* ks = pass & 1 ? kb : ka;
+        const int* is = pass & 1 ? ib : ia;
+        unsigned* kd = pass & 1 ? ka : kb;
+        int* id = pass & 1 ? ia : ib;
+        for (int d = 0; d < 16; ++d) cnt[d * kV70SortThreads + t] = 0;
+        __syncthreads();
+        for (int i = lo; i < hi; ++i) ++cnt[((ks[i] >> sh) & 15u) * kV70SortThreads + t];
+        __syncthreads();
+        // exclusive scan of the flat digit-major array: 16 elements per thread, then across the threads
+        unsigned v[16], run = 0;
+        for (int j = 0; j < 16; ++j) { v[j] = run; run += cnt[t * 16 + j]; }
+        unsigned x = run;
+        for (int o = 1; o < 32; o <<= 1) {
+            const unsigned y = __shfl_up_sync(0xffffffffu, x, o);
+            if (lane >= o) x += y;
+        }
+        if (lane == 31) warp_sum[warp] = x;
+        __syncthreads();
+        if (warp == 0) {
+            unsigned w = warp_sum[lane];
+            for (int o = 1; o < 32; o <<= 1) {
+                const unsigned y = __shfl_up_sync(0xffffffffu, w, o);
+                if (lane >= o) w += y;
+            }
+            warp_sum[lane] = w;
+        }
+        __syncthreads();
+        const unsigned base = x - run + (warp > 0 ? warp_sum[warp - 1] : 0u);
+        for (int j = 0; j < 16; ++j) cnt[t * 16 + j] = base + v[j];
+        __syncthreads();
+        for (int i = lo; i < hi; ++i) {
+            const unsigned k = ks[i];
+            const unsigned pos = cnt[((k >> sh) & 15u) * kV70SortThreads + t]++;
+            kd[pos] = k;
+            id[pos] = is[i];
+        }
+        __syncthreads();
+    }
+    for (int i = t; i < n; i += kV70SortThreads) { kb[i] = ka[i]; ib[i] = ia[i]; }
+}
+
 constexpr int kWideRows = 8;           // rows of one pass (their buffers); more rows take several passes
 
 // a row's scan state between the wide path's launches
@@ -1497,7 +1559,7 @@ bool wide_buffers(void* stream, int n_vocab, WideBuffers& out) {
     const size_t state = ((size_t) kWideRows * sizeof(WideRow) + 255) / 256 * 256;
     if (slot->n_vocab < n_vocab) {
         size_t temp = 0;
-        if (cub::DeviceRadixSort::SortPairs(nullptr, temp, (const unsigned*) nullptr, (unsigned*) nullptr,
+        if (!basalt::kernels::sm70_current() && cub::DeviceRadixSort::SortPairs(nullptr, temp, (const unsigned*) nullptr, (unsigned*) nullptr,
                                             (const int*) nullptr, (int*) nullptr, n_vocab, 0, 32,
                                             (cudaStream_t) stream) != cudaSuccess) {
             (void) cudaGetLastError();
@@ -1543,10 +1605,13 @@ void sample_wide(const float* logits, int n_tokens, int n_vocab, const int* hist
         const int R = n_tokens - t0 < kWideRows ? n_tokens - t0 : kWideRows;
         SamplerParams pr = p;
         pr.counter = p.counter + (uint64_t) t0;   // row t0 + t draws Philox(seed, counter + t0 + t)
-        sampler_wide_keys_kernel<<<dim3((unsigned) nb, (unsigned) R), kWideKeyThreads, 0, cs>>>(
-            logits + (size_t) t0 * n_vocab, n_vocab, hist ? history + (size_t) t0 * history_len : nullptr, history_len,
+        basalt::kernels::launch_cc(sampler_wide_keys_kernel, dim3((unsigned) nb, (unsigned) R), kWideKeyThreads, 0, cs, logits + (size_t) t0 * n_vocab, n_vocab, hist ? history + (size_t) t0 * history_len : nullptr, history_len,
             pr, k, w.keys_in, w.ids_in, w.rows);
-        for (int t = 0; t < R; ++t) {
+        if (basalt::kernels::sm70_current()) {   // keys_in / ids_in are scratch past the sort (terms reuse them)
+            basalt::kernels::launch_cc(v70_sort_pairs_kernel, (unsigned) R, kV70SortThreads, kV70SortSmem, cs,
+                                       w.keys_in, w.ids_in, w.keys, w.ids, n_vocab);
+        }
+        for (int t = 0; t < R && !basalt::kernels::sm70_current(); ++t) {
             size_t temp = w.temp_bytes;
             const size_t o = (size_t) t * n_vocab;
             const cudaError_t se = cub::DeviceRadixSort::SortPairs(w.temp, temp, w.keys_in + o, w.keys + o, w.ids_in + o,
@@ -1558,19 +1623,19 @@ void sample_wide(const float* logits, int n_tokens, int n_vocab, const int* hist
         }
         const dim3 grid(kWideChunks / 32, (unsigned) R);
         if (p.top_p < 1.0f) {
-            sampler_wide_terms_kernel<<<grid, 32, 0, cs>>>(w.keys, n_vocab, k, pr, 1, w.terms, w.part, w.rows);
-            sampler_wide_scan_kernel<<<(unsigned) R, kWideChunks, 0, cs>>>(w.part, w.pre, 1, w.rows);
+            basalt::kernels::launch_cc(sampler_wide_terms_kernel, grid, 32, 0, cs, w.keys, n_vocab, k, pr, 1, w.terms, w.part, w.rows);
+            basalt::kernels::launch_cc(sampler_wide_scan_kernel, (unsigned) R, kWideChunks, 0, cs, w.part, w.pre, 1, w.rows);
         }
         if (p.top_p < 1.0f || p.min_p > 0.0f)
-            sampler_wide_search_kernel<<<grid, 32, 0, cs>>>(w.keys, w.ids, n_vocab, k, pr, 1, w.terms, w.pre, nullptr, 0,
+            basalt::kernels::launch_cc(sampler_wide_search_kernel, grid, 32, 0, cs, w.keys, w.ids, n_vocab, k, pr, 1, w.terms, w.pre, nullptr, 0,
                                                             w.rows);
-        sampler_wide_terms_kernel<<<grid, 32, 0, cs>>>(w.keys, n_vocab, k, pr, 2, w.terms, w.part, w.rows);
-        sampler_wide_scan_kernel<<<(unsigned) R, kWideChunks, 0, cs>>>(w.part, w.pre, 2, w.rows);
+        basalt::kernels::launch_cc(sampler_wide_terms_kernel, grid, 32, 0, cs, w.keys, n_vocab, k, pr, 2, w.terms, w.part, w.rows);
+        basalt::kernels::launch_cc(sampler_wide_scan_kernel, (unsigned) R, kWideChunks, 0, cs, w.part, w.pre, 2, w.rows);
         // the query rows of this pass (row t0 + t asks for query[t0 + t])
         const int nq = n_query - t0 > 0 ? n_query - t0 : 0;
-        sampler_wide_search_kernel<<<grid, 32, 0, cs>>>(w.keys, w.ids, n_vocab, k, pr, 2, w.terms, w.pre,
+        basalt::kernels::launch_cc(sampler_wide_search_kernel, grid, 32, 0, cs, w.keys, w.ids, n_vocab, k, pr, 2, w.terms, w.pre,
                                                         query != nullptr && nq > 0 ? query + t0 : nullptr, nq, w.rows);
-        sampler_wide_out_kernel<<<1, 32, 0, cs>>>(w.keys, w.ids, n_vocab, R, w.terms, w.rows, t0, out,
+        basalt::kernels::launch_cc(sampler_wide_out_kernel, 1, 32, 0, cs, w.keys, w.ids, n_vocab, R, w.terms, w.rows, t0, out,
                                                   qprob != nullptr ? n_query : 0, qprob);
     }
 }
@@ -1607,7 +1672,7 @@ bool sample_greedy_cluster(const float* logits, int n_tokens, int n_vocab, int* 
         cudaFuncAttributes fa{};
         const bool runs = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
                           major >= 9 &&
-                          cudaFuncGetAttributes(&fa, sampler_greedy_cluster_kernel) == cudaSuccess &&
+                          basalt::kernels::cc_func_get_attributes(&fa, sampler_greedy_cluster_kernel) == cudaSuccess &&
                           fa.ptxVersion >= 90 && fa.binaryVersion >= 90 &&
                           cudaOccupancyMaxActiveClusters(&clusters, sampler_greedy_cluster_kernel, &cfg) ==
                               cudaSuccess &&
@@ -1617,7 +1682,7 @@ bool sample_greedy_cluster(const float* logits, int n_tokens, int n_vocab, int* 
     }
     if (ok[dev] != 1) return false;
     cfg.gridDim = dim3(kAmCtas, (unsigned) n_tokens, 1);
-    const cudaError_t e = cudaLaunchKernelEx(&cfg, sampler_greedy_cluster_kernel, logits, n_vocab, out);
+    const cudaError_t e = basalt::kernels::cc_launch_ex(&cfg, sampler_greedy_cluster_kernel, logits, n_vocab, out);
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "sample_tokens cluster launch: %s", cudaGetErrorString(e));
         std::exit(1);
@@ -1650,7 +1715,7 @@ bool sample_greedy_top_prob(const float* logits, int n_tokens, int n_vocab, cons
         cudaFuncAttributes fa{};
         const bool runs = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
                           major >= 9 &&
-                          cudaFuncGetAttributes(&fa, sampler_greedy_top_prob_cluster_kernel) == cudaSuccess &&
+                          basalt::kernels::cc_func_get_attributes(&fa, sampler_greedy_top_prob_cluster_kernel) == cudaSuccess &&
                           fa.ptxVersion >= 90 && fa.binaryVersion >= 90 &&
                           cudaOccupancyMaxActiveClusters(&clusters, sampler_greedy_top_prob_cluster_kernel, &cfg) ==
                               cudaSuccess &&
@@ -1660,7 +1725,7 @@ bool sample_greedy_top_prob(const float* logits, int n_tokens, int n_vocab, cons
     }
     if (ok[dev] != 1) return false;
     cfg.gridDim = dim3(kAmCtas, (unsigned) n_tokens, 1);
-    const cudaError_t e = cudaLaunchKernelEx(&cfg, sampler_greedy_top_prob_cluster_kernel, logits, n_vocab, map, out,
+    const cudaError_t e = basalt::kernels::cc_launch_ex(&cfg, sampler_greedy_top_prob_cluster_kernel, logits, n_vocab, map, out,
                                              probs);
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "sample_greedy_top_prob launch: %s", cudaGetErrorString(e));
@@ -1701,8 +1766,7 @@ void sample_tokens_impl(int split, const float* logits, int n_tokens, int n_voca
         // One block per token, 1,024 threads over the vocabulary.  See `sampler_greedy_kernel`.
         const int gthreads = 1024;
         if (!(shmem == 0 && p.logit_bias == nullptr && sample_greedy_cluster(logits, n_tokens, n_vocab, out, stream)))
-            sampler_greedy_kernel<<<(unsigned) n_tokens, gthreads, shmem, cs>>>(
-                logits, n_vocab, history, history_len, p, p.penalty_last_n, p.penalty_last_n, out);
+            basalt::kernels::launch_cc(sampler_greedy_kernel, (unsigned) n_tokens, gthreads, shmem, cs, logits, n_vocab, history, history_len, p, p.penalty_last_n, p.penalty_last_n, out);
     } else {
         // The split top_k over 4,096-logit blocks (61 per row for 248,320 logits).  The one-block kernel when the
         // split cannot run: a wider vocabulary than the merge holds, more than `kSplitMaxRows` rows (the engine
@@ -1719,18 +1783,17 @@ void sample_tokens_impl(int split, const float* logits, int n_tokens, int n_voca
         if (k > kSelMax || split == 3) {
             sample_wide(logits, n_tokens, n_vocab, history, history_len, p, k, out, query, n_query, qprob, stream);
         } else if (scratch == nullptr) {
-            sampler_one_block_kernel<<<(unsigned) n_tokens, 1024, shmem, cs>>>(
-                logits, n_vocab, history, history_len, p, out, query, n_query, qprob);
+            basalt::kernels::launch_cc(sampler_one_block_kernel, (unsigned) n_tokens, 1024, shmem, cs, logits, n_vocab, history, history_len, p, out, query, n_query, qprob);
         } else if (split == 2 && k <= kSortSpan) {
-            sampler_sort_kernel<<<grid, kSortWarps * 32, 0, cs>>>(logits, n_vocab, history, history_len, p, k, n_blocks,
+            basalt::kernels::launch_cc(sampler_sort_kernel, grid, kSortWarps * 32, 0, cs, logits, n_vocab, history, history_len, p, k, n_blocks,
                                                                   scratch, done, out, query, n_query, qprob);
         } else if (split >= 1) {
-            sampler_fused_kernel<8, 16><<<grid, 512, 0, cs>>>(logits, n_vocab, history, history_len, p, k, n_blocks,
+            basalt::kernels::launch_cc(sampler_fused_kernel<8, 16>, grid, 512, 0, cs, logits, n_vocab, history, history_len, p, k, n_blocks,
                                                               scratch, done, out, query, n_query, qprob);
         } else {
-            sampler_split_part_kernel<<<grid, kSplitWarps * 32, 0, cs>>>(logits, n_vocab, history, history_len, p, k,
+            basalt::kernels::launch_cc(sampler_split_part_kernel, grid, kSplitWarps * 32, 0, cs, logits, n_vocab, history, history_len, p, k,
                                                                           n_blocks, scratch);
-            sampler_split_merge_kernel<<<(unsigned) n_tokens, 32, 0, cs>>>(scratch, n_blocks, n_vocab, p, k, out,
+            basalt::kernels::launch_cc(sampler_split_merge_kernel, (unsigned) n_tokens, 32, 0, cs, scratch, n_blocks, n_vocab, p, k, out,
                                                                           query, n_query, qprob);
         }
     }

@@ -39,6 +39,7 @@
 #include <cstring>
 #include <stdexcept>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -118,8 +119,7 @@ void shared_expert_multi(int n_tok, const float* x, const NativeSharedWeights& n
                    dim3(THREADS), 0, cs, out, g, (int) n_embd);
     } else {
         bf16_gemv_fp32_mmvf(x, gate_inp_bf16, g, n_embd, 1, stream);
-        sigmoid_scale_rows_kernel<<<dim3((unsigned) ((n_embd + THREADS - 1) / THREADS), 1u), THREADS, 0, cs>>>(
-            out, g, (int) n_embd);
+        basalt::kernels::launch_cc(sigmoid_scale_rows_kernel, dim3((unsigned) ((n_embd + THREADS - 1) / THREADS), 1u), THREADS, 0, cs, out, g, (int) n_embd);
     }
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) throw std::runtime_error(std::string("shared_expert_multi: ") + cudaGetErrorString(e));
@@ -223,9 +223,9 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const SForm& gat
         native_mmvq(native->down_type, native->down_data, native->q8_1, out, (int) n_ff, (int) n_embd, 1, stream);
     } else {
         if (native_projection)
-            native_swiglu_kernel<<<g_ff, THREADS, 0, (cudaStream_t) stream>>>(gate, up, gate, (int) n_ff);
+            basalt::kernels::launch_cc(native_swiglu_kernel, g_ff, THREADS, 0, (cudaStream_t) stream, gate, up, gate, (int) n_ff);
         else
-            swiglu_kernel<<<g_ff, THREADS, 0, (cudaStream_t) stream>>>(gate, up, gate, (int) n_ff);
+            basalt::kernels::launch_cc(swiglu_kernel, g_ff, THREADS, 0, (cudaStream_t) stream, gate, up, gate, (int) n_ff);
 
         // down: (n_ff) -> (n_embd), and THE INTERMEDIATE IS QUANTIZED TO THE DOWN WEIGHT'S OWN CONTRACT - which is
         // what `ggml_mul_mat` does for every matmul in the model.
@@ -252,7 +252,7 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const SForm& gat
     // the per-token scalar gate, then the multiply.  Note the gate is computed from `x`, the ORIGINAL hidden
     // state, not from anything the expert produced.  The dot is the FP32-activation BF16 MMVF.
     bf16_gemv_fp32_mmvf(x_f32, gate_inp_bf16, g, n_embd, 1, stream);
-    sigmoid_scale_rows_kernel<<<dim3(g_embd, 1u), THREADS, 0, (cudaStream_t) stream>>>(out, g, (int) n_embd);
+    basalt::kernels::launch_cc(sigmoid_scale_rows_kernel, dim3(g_embd, 1u), THREADS, 0, (cudaStream_t) stream, out, g, (int) n_embd);
 
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
@@ -273,7 +273,7 @@ void moe_combine(const float* parts, const float* weights, const float* shared, 
         std::exit(1);
     }
     const unsigned grid = (unsigned) ((n_embd + THREADS - 1) / THREADS);
-    moe_combine_kernel<<<grid, THREADS, 0, (cudaStream_t) stream>>>(parts, weights, shared, y, (int) n_embd,
+    basalt::kernels::launch_cc(moe_combine_kernel, grid, THREADS, 0, (cudaStream_t) stream, parts, weights, shared, y, (int) n_embd,
                                                                    (int) k, shared != nullptr);
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();

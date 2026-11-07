@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <stdexcept>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -153,20 +154,19 @@ void native_gdn_conv_silu(float* history, const float* input, const float* weigh
         for (int j = 0; j < i; ++j) disjoint(writable[i], writable[j]);
         for (auto span : inputs) disjoint(writable[i], span);
     }
-    conv_silu<<<unsigned((channels + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(
-        history, input, weights, raw_output, silu_output, int(channels));
+    basalt::kernels::launch_cc(conv_silu, unsigned((channels + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream), history, input, weights, raw_output, silu_output, int(channels));
     check_launch();
 }
 void native_gdn_l2_norm(float* input, int64_t rows, int64_t cols, float epsilon, void* stream) {
     norm_geometry(rows, cols, epsilon, stream);
     valid({input, size_t(rows) * S * sizeof(float)});
-    l2_norm<<<unsigned(rows), 256, 0, static_cast<cudaStream_t>(stream)>>>(input, epsilon / S, 1.0f / sqrtf(float(S)));
+    basalt::kernels::launch_cc(l2_norm, unsigned(rows), 256, 0, static_cast<cudaStream_t>(stream), input, epsilon / S, 1.0f / sqrtf(float(S)));
     check_launch();
 }
 void native_gdn_beta_gate(float* beta, int64_t heads, void* stream) {
     count_and_stream(heads, stream);
     valid({beta, size_t(heads) * sizeof(float)});
-    beta_sigmoid<<<unsigned((heads + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(beta, int(heads));
+    basalt::kernels::launch_cc(beta_sigmoid, unsigned((heads + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream), beta, int(heads));
     check_launch();
 }
 void native_gdn_gate(const float* alpha, const float* dt, const float* ssm_a,
@@ -179,7 +179,7 @@ void native_gdn_gate(const float* alpha, const float* dt, const float* ssm_a,
         valid(input);
         disjoint(output, input);
     }
-    gate_softplus<<<unsigned((heads + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(alpha, dt, ssm_a, gate, int(heads));
+    basalt::kernels::launch_cc(gate_softplus, unsigned((heads + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream), alpha, dt, ssm_a, gate, int(heads));
     check_launch();
 }
 void native_gdn_out_norm(const float* output, const float* z, const float* gamma,
@@ -193,7 +193,7 @@ void native_gdn_out_norm(const float* output, const float* z, const float* gamma
         valid(input);
         disjoint(writable, input);
     }
-    out_norm<<<unsigned(heads), 256, 0, static_cast<cudaStream_t>(stream)>>>(output, z, gamma, destination, epsilon);
+    basalt::kernels::launch_cc(out_norm, unsigned(heads), 256, 0, static_cast<cudaStream_t>(stream), output, z, gamma, destination, epsilon);
     check_launch();
 }
 } // namespace basalt::kernels

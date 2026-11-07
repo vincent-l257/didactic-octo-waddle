@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -96,7 +97,7 @@ void bf16_gemv(const uint16_t* x, const uint16_t* w, float* y, int64_t n_in, int
     if (n_out >= 64) {
         const int warps = THREADS / 32;
         const unsigned grid = (unsigned) ((n_out + warps - 1) / warps);
-        bf16_gemv_warp_kernel<<<grid, THREADS, 0, (cudaStream_t) stream>>>(x, w, y, n_in, n_out);
+        basalt::kernels::launch_cc(bf16_gemv_warp_kernel, grid, THREADS, 0, (cudaStream_t) stream, x, w, y, n_in, n_out);
         finish(stream, "bf16_gemv(warp)");
         return;
     }
@@ -104,7 +105,7 @@ void bf16_gemv(const uint16_t* x, const uint16_t* w, float* y, int64_t n_in, int
     // not wasting warps.  It is still uncoalesced, so this is the branch to revisit if a small-output caller
     // ever shows up hot in the profile.
     const unsigned grid = (unsigned) ((n_out + THREADS - 1) / THREADS);
-    bf16_gemv_naive_kernel<<<grid, THREADS, 0, (cudaStream_t) stream>>>(x, w, y, n_in, n_out);
+    basalt::kernels::launch_cc(bf16_gemv_naive_kernel, grid, THREADS, 0, (cudaStream_t) stream, x, w, y, n_in, n_out);
     finish(stream, "bf16_gemv");
 }
 
@@ -117,7 +118,7 @@ void bf16_gemv_split(const uint16_t* x, const uint16_t* w, float* y, int64_t n_i
     if (threads_per_row == 32) {
         const int warps = THREADS / 32;
         const unsigned grid = (unsigned) ((n_out + warps - 1) / warps);
-        bf16_gemv_warp_kernel<<<grid, THREADS, 0, (cudaStream_t) stream>>>(x, w, y, n_in, n_out);
+        basalt::kernels::launch_cc(bf16_gemv_warp_kernel, grid, THREADS, 0, (cudaStream_t) stream, x, w, y, n_in, n_out);
         finish(stream, "bf16_gemv_split(warp)");
         return;
     }
@@ -127,8 +128,7 @@ void bf16_gemv_split(const uint16_t* x, const uint16_t* w, float* y, int64_t n_i
         std::exit(1);
     }
     const unsigned grid = (unsigned) n_out;
-    bf16_gemv_split_kernel<<<grid, threads_per_row, (size_t) threads_per_row * sizeof(float),
-                             (cudaStream_t) stream>>>(x, w, y, n_in, n_out, threads_per_row);
+    basalt::kernels::launch_cc(bf16_gemv_split_kernel, grid, threads_per_row, (size_t) threads_per_row * sizeof(float), (cudaStream_t) stream, x, w, y, n_in, n_out, threads_per_row);
     finish(stream, "bf16_gemv_split");
 }
 

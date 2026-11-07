@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::core {
 
@@ -110,7 +111,7 @@ namespace basalt::core {
 std::string device_code_error() {
     // every .cu of the engine is compiled for the same CMAKE_CUDA_ARCHITECTURES, so this kernel stands for all
     cudaFuncAttributes a{};
-    const cudaError_t e = cudaFuncGetAttributes(&a, poison_kernel);
+    const cudaError_t e = basalt::kernels::cc_func_get_attributes(&a, poison_kernel);
     if (e == cudaSuccess) return {};
     cudaGetLastError();
     return cudaGetErrorString(e);
@@ -146,13 +147,14 @@ DeviceInfo device_info(int ordinal) {
     check(cudaDriverGetVersion(&d.driver_version), "cudaDriverGetVersion");
     check(cudaRuntimeGetVersion(&d.runtime_version), "cudaRuntimeGetVersion");
 
-    // sm_120 runs the main card. sm_86 is the Ampere peer image. Anything else has no cubin.
+    // sm_120 runs the main card. sm_86 is the Ampere peer image; cc 7.0 runs the separately built sm_70 cubins.
     const bool blackwell = d.cc_major == 12 && d.cc_minor == 0;
     const bool ampere = d.cc_major == 8 && d.cc_minor == 6;
-    if (!blackwell && !ampere) {
+    const bool volta = d.cc_major == 7 && d.cc_minor == 0;
+    if (!blackwell && !ampere && !volta) {
         throw CudaError("device " + d.name + " reports compute capability " + std::to_string(d.cc_major) + "." +
-                            std::to_string(d.cc_minor) + "; basalt needs compute capability 12.0, or 8.6 as a peer",
-                        -1);
+                            std::to_string(d.cc_minor) + "; basalt needs compute capability 12.0, or 8.6 or 7.0 "
+                            "beside it", -1);
     }
     return d;
 }
@@ -173,7 +175,7 @@ DeviceArena::DeviceArena(uint64_t bytes, int ordinal, bool poison)
         const uint64_t max_blocks = 0x7FFFFFFFull;
         for (uint64_t b = 0; b < blocks; b += max_blocks) {
             const uint64_t chunk = (blocks - b < max_blocks) ? (blocks - b) : max_blocks;
-            poison_kernel<<<(unsigned) chunk, threads>>>((float*) base_ + b * threads, n - b * threads);
+            basalt::kernels::launch_cc(poison_kernel, (unsigned) chunk, threads, 0, 0, (float*) base_ + b * threads, n - b * threads);
             check(cudaGetLastError(), "poison_kernel");
         }
         check(cudaDeviceSynchronize(), "poison sync");

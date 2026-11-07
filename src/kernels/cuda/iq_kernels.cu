@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <type_traits>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -2545,7 +2546,7 @@ bool gu_mma_usable(const NativeExpertLayout& L) {
         int major = 0;
         cudaFuncAttributes fa{};
         const bool q1 = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess;
-        const bool q2 = q1 && cudaFuncGetAttributes(&fa, native_gu_mma_kernel) == cudaSuccess;
+        const bool q2 = q1 && basalt::kernels::cc_func_get_attributes(&fa, native_gu_mma_kernel) == cudaSuccess;
         if (!q1 || !q2) cudaGetLastError();
         ok[dev] = q2 && major >= 8 && fa.ptxVersion >= 80 ? 1 : 2;
     }
@@ -2568,8 +2569,8 @@ int mmvq_mma_sms() {
         cudaFuncAttributes f1{}, f2{};
         const bool q = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
                        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess &&
-                       cudaFuncGetAttributes(&f1, mmvq_iq3s_mma_kernel<1>) == cudaSuccess &&
-                       cudaFuncGetAttributes(&f2, mmvq_iq3s_mma_kernel<2>) == cudaSuccess;
+                       basalt::kernels::cc_func_get_attributes(&f1, mmvq_iq3s_mma_kernel<1>) == cudaSuccess &&
+                       basalt::kernels::cc_func_get_attributes(&f2, mmvq_iq3s_mma_kernel<2>) == cudaSuccess;
         if (!q) cudaGetLastError();
         known[dev] = q && major >= 8 && f1.ptxVersion >= 80 && f2.ptxVersion >= 80 && sms > 0
                          ? sms : -1;
@@ -2634,7 +2635,7 @@ void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, con
     if constexpr (TG == 18) {
         if (allow_mma && (g_gu_mma == 1 || (g_gu_mma == 2 && t_gu_mma_hint)) && !g_old_kernels && gu_mma_usable(L)) {
             const dim3 gm((unsigned) (2 * L.n_ff / kGmRows), grid.y);
-            native_gu_mma_kernel<<<gm, 256, gu_mma_smem(L.n_embd), s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L,
+            basalt::kernels::launch_cc(native_gu_mma_kernel, gm, 256, gu_mma_smem(L.n_embd), s, grp_ptr, grp_start, n_groups, ent_tok, X, L,
                                                                          gate, up);
             return;
         }
@@ -2642,39 +2643,39 @@ void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, con
     if constexpr (kGu2Q2<TG>) {
         if (allow_mma && g_gu2 && !g_old_kernels && gu2_usable(L)) {
             const dim3 g2((unsigned) ((2 * L.n_ff + GU2_ROWS - 1) / GU2_ROWS), grid.y);
-            native_gu2_kernel<TG><<<g2, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+            basalt::kernels::launch_cc(native_gu2_kernel<TG>, g2, 256, 0, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
             return;
         }
     }
     const size_t sx_bytes = (size_t) kGuStageT * (size_t) (L.n_embd / 32) * sizeof(block_q8_1);
-    if constexpr (!kSplit<TG>) native_gu_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
-    else if (g_old_kernels) native_gu_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+    if constexpr (!kSplit<TG>) basalt::kernels::launch_cc(native_gu_kernel<TG>, grid, 256, 0, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+    else if (g_old_kernels) basalt::kernels::launch_cc(native_gu_kernel<TG>, grid, 256, 0, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     else if (g_gu_stage && sx_bytes <= 40 * 1024) {
         if constexpr (kStageIqGrid<TG>) {
             if (!g_stage_grid) {
-                native_gu_multi_sx_kernel<TG, false><<<grid, 256, sx_bytes, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+                basalt::kernels::launch_cc(native_gu_multi_sx_kernel<TG, false>, grid, 256, sx_bytes, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
                 return;
             }
         }
-        native_gu_multi_sx_kernel<TG><<<grid, 256, sx_bytes, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+        basalt::kernels::launch_cc(native_gu_multi_sx_kernel<TG>, grid, 256, sx_bytes, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     }
     else if constexpr (kStageIqGrid<TG>) {
         if (!g_stage_grid) {
-            native_gu_multi_kernel<TG, false><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+            basalt::kernels::launch_cc(native_gu_multi_kernel<TG, false>, grid, 256, 0, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
             return;
         }
-        native_gu_multi_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
-    } else native_gu_multi_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+        basalt::kernels::launch_cc(native_gu_multi_kernel<TG>, grid, 256, 0, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+    } else basalt::kernels::launch_cc(native_gu_multi_kernel<TG>, grid, 256, 0, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
 }
 
 template<int TD>
 void launch_down(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                  const int32_t* n_groups, const int32_t* ent_dst, const block_q8_1* hq, const NativeExpertLayout& L,
                  float* out, bool dep = false) {
-    if constexpr (!kSplit<TD>) native_down_kernel<TD><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
-    else if (g_old_kernels) native_down_kernel<TD><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+    if constexpr (!kSplit<TD>) basalt::kernels::launch_cc(native_down_kernel<TD>, grid, 256, 0, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+    else if (g_old_kernels) basalt::kernels::launch_cc(native_down_kernel<TD>, grid, 256, 0, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
     else if (dep) launch_dependent(native_down_multi_kernel<TD, true>, grid, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
-    else native_down_multi_kernel<TD><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+    else basalt::kernels::launch_cc(native_down_multi_kernel<TD>, grid, 256, 0, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
 }
 
 }  // namespace
@@ -2717,7 +2718,7 @@ size_t iq_row_bytes(int t, int64_t n) noexcept {
 void quantize_q8_1_rows(const float* x, int64_t n_rows, int64_t n_cols, void* y, void* stream) {
     const long long n = (long long) n_rows * n_cols;
     if (n <= 0) return;
-    quantize_q8_1_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, (cudaStream_t) stream>>>(x, (block_q8_1*) y, n);
+    basalt::kernels::launch_cc(quantize_q8_1_kernel, (unsigned) ((n + 255) / 256), 256, 0, (cudaStream_t) stream, x, (block_q8_1*) y, n);
     check("quantize_q8_1_rows");
 }
 
@@ -2737,7 +2738,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
 
 void iq_dequant_f16(int t, const void* src, int64_t n, uint16_t* dst, void* stream, const float* scale) {
     if (n % 256 != 0 || !is_iq(t)) { basalt::log::error("basalt", "iq_dequant_f16: bad arguments"); std::exit(1); }
-    dequant_flat_kernel<__half><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, (__half*) dst, scale);
+    basalt::kernels::launch_cc(dequant_flat_kernel<__half>, (unsigned) (n / 256), 32, 0, (cudaStream_t) stream, t, src, (__half*) dst, scale);
     check("iq_dequant_f16");
 }
 
@@ -2758,14 +2759,13 @@ void iq_embed_rows(int t, const void* table, size_t row_bytes, const int32_t* to
     if (n_tok <= 0) return;
     if (n_embd % 256 != 0 || !embed_type_supported(t)) { basalt::log::error("basalt", "iq_embed_rows: bad arguments"); std::exit(1); }
     if (hot == nullptr) n_hot = 0;
-    embed_rows_kernel<<<dim3((unsigned) (n_embd / 256), (unsigned) n_tok), 32, 0, (cudaStream_t) stream>>>(
-        t, (const uint8_t*) table, (const uint8_t*) hot, n_hot, row_bytes, tokens, n_embd, out);
+    basalt::kernels::launch_cc(embed_rows_kernel, dim3((unsigned) (n_embd / 256), (unsigned) n_tok), 32, 0, (cudaStream_t) stream, t, (const uint8_t*) table, (const uint8_t*) hot, n_hot, row_bytes, tokens, n_embd, out);
     check("iq_embed_rows");
 }
 
 void iq_dequant_f32(int t, const void* src, int64_t n, float* dst, void* stream) {
     if (n % 256 != 0 || !embed_type_supported(t)) { basalt::log::error("basalt", "iq_dequant_f32: bad arguments"); std::exit(1); }
-    dequant_flat_kernel<float><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, dst);
+    basalt::kernels::launch_cc(dequant_flat_kernel<float>, (unsigned) (n / 256), 32, 0, (cudaStream_t) stream, t, src, dst);
     check("iq_dequant_f32");
 }
 
@@ -2774,7 +2774,7 @@ void iq_dequant_gu_f16(int t, const void* gate, const void* up, int64_t n_ff, in
     // checked like the other entry points: an unknown type would leave `dst` unwritten, a wrong prompt and no error
     if (n_embd % 256 != 0 || !is_iq(t)) { basalt::log::error("basalt", "iq_dequant_gu_f16: type %d / %lld", t, (long long) n_embd); std::exit(1); }
     const int64_t per_row = n_embd / 256;
-    dequant_gu_kernel<<<dim3((unsigned) (n_ff * per_row), 2), 32, 0, (cudaStream_t) stream>>>(t, gate, up, per_row,
+    basalt::kernels::launch_cc(dequant_gu_kernel, dim3((unsigned) (n_ff * per_row), 2), 32, 0, (cudaStream_t) stream, t, gate, up, per_row,
                                                                                            (__half*) dst, scale);
     check("iq_dequant_gu_f16");
 }
@@ -2850,13 +2850,13 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     const long long nh = (long long) cap_entries * L.n_ff;
     const bool sw_v1 = v1;
     if (sw_v1) {
-        swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);
-        quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
+        basalt::kernels::launch_cc(swiglu_entries_kernel, (unsigned) ((nh + 255) / 256), 256, 0, s, gate, up, h, nh);
+        basalt::kernels::launch_cc(quantize_q8_1_kernel, (unsigned) ((nh + 255) / 256), 256, 0, s, h, hq, nh);
     } else if (chain) {
         launch_dependent(swiglu_q8_1_entries_pdl_kernel, dim3((unsigned) ((nh + 255) / 256)), s, (const float*) gate,
                          (const float*) up, grp_start, n_groups, (int) L.n_ff, hq);
     } else {
-        swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, grp_start, n_groups,
+        basalt::kernels::launch_cc(swiglu_q8_1_entries_kernel, (unsigned) ((nh + 255) / 256), 256, 0, s, gate, up, grp_start, n_groups,
                                                                                 (int) L.n_ff, hq);
     }
     check("native_expert_grouped/swiglu");

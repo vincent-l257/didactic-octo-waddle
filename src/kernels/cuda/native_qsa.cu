@@ -30,6 +30,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -108,16 +109,16 @@ void native_qsa_rms_norm_weighted(const float* input, const float* gamma, float*
         throw std::invalid_argument("native QSA requires finite nonnegative epsilon");
     buffers(input, count * 4, gamma, std::size_t(n_cols) * 4, output, stream);
     if (n_cols < 1024)
-        norm<256><<<unsigned(n_rows), 256, 0, static_cast<cudaStream_t>(stream)>>>(input, gamma, output, n_cols, epsilon);
+        basalt::kernels::launch_cc(norm<256>, unsigned(n_rows), 256, 0, static_cast<cudaStream_t>(stream), input, gamma, output, n_cols, epsilon);
     else
-        norm<1024><<<unsigned(n_rows), 1024, 0, static_cast<cudaStream_t>(stream)>>>(input, gamma, output, n_cols, epsilon);
+        basalt::kernels::launch_cc(norm<1024>, unsigned(n_rows), 1024, 0, static_cast<cudaStream_t>(stream), input, gamma, output, n_cols, epsilon);
     check_launch();
 }
 void native_qsa_gate_apply(const float* attn, const float* q_full, float* output,
                            int n_head, int head_dim, void* stream) {
     const auto count = elements(head_dim, n_head);
     buffers(attn, count * 4, q_full, count * 8, output, stream);
-    gate<<<unsigned((count + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(attn, q_full, output, n_head, head_dim);
+    basalt::kernels::launch_cc(gate, unsigned((count + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream), attn, q_full, output, n_head, head_dim);
     check_launch();
 }
 } // namespace basalt::kernels

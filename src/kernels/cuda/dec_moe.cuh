@@ -4,6 +4,7 @@
 #include "basalt/kernels/verify_kernels.hpp"
 #include "basalt/core/diag.hpp"
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -766,7 +767,7 @@ template<int TG> int dm_glue_blocks() {
     if (b[dev] == 0) {
         int sms = 0, per = 0;
         if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
-            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, dm_glue_gu_kernel<TG>, 256, 0) != cudaSuccess) {
+            basalt::kernels::cc_occupancy(&per, dm_glue_gu_kernel<TG>, 256, 0) != cudaSuccess) {
             cudaGetLastError();
             return 0;
         }
@@ -994,7 +995,7 @@ template<int TG> int dm_glue1_blocks() {
     if (b[dev] == 0) {
         int sms = 0, per = 0;
         if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
-            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, dm_glue_gu1_kernel<TG>, 256, 0) != cudaSuccess) {
+            basalt::kernels::cc_occupancy(&per, dm_glue_gu1_kernel<TG>, 256, 0) != cudaSuccess) {
             cudaGetLastError();
             return 0;
         }
@@ -2118,7 +2119,7 @@ int dm_vram_tma_blocks() {
     if (known[dev] == 0) {
         int sms = 0, per = 0;
         if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
-            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, dm_vram_tma_kernel<TG, TD>, kDmThreads, 0) != cudaSuccess) {
+            basalt::kernels::cc_occupancy(&per, dm_vram_tma_kernel<TG, TD>, kDmThreads, 0) != cudaSuccess) {
             cudaGetLastError();
             per = 0;
         }
@@ -2135,7 +2136,7 @@ int dm_vram_blocks() {
     if (known[dev] == 0) {
         int sms = 0, per = 0;
         if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
-            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, dm_vram_kernel<TG, TD>, kDmThreads, 0) != cudaSuccess) {
+            basalt::kernels::cc_occupancy(&per, dm_vram_kernel<TG, TD>, kDmThreads, 0) != cudaSuccess) {
             cudaGetLastError();
             per = 0;
         }
@@ -2175,7 +2176,7 @@ void dec_moe_route(const DmRouteArgs& a, void* stream) {
         std::exit(1);
     }
     const dim3 grid((unsigned) dec_moe_route_blocks(a.n_tok, a.n_embd));
-    dm_route_kernel<<<grid, kDmThreads, 0, (cudaStream_t) stream>>>(a);
+    basalt::kernels::launch_cc(dm_route_kernel, grid, kDmThreads, 0, (cudaStream_t) stream, a);
     check("dec_moe_route");
 }
 
@@ -2186,7 +2187,7 @@ void dec_moe_stage(const DmRouteArgs& a, uint8_t* staging, int64_t stride, int64
                            (long long) blob_bytes, (long long) stride);
         std::exit(1);
     }
-    dm_stage_kernel<<<(unsigned) blocks, kDmThreads, 0, (cudaStream_t) stream>>>(a, staging, (long long) stride,
+    basalt::kernels::launch_cc(dm_stage_kernel, (unsigned) blocks, kDmThreads, 0, (cudaStream_t) stream, a, staging, (long long) stride,
                                                                                 (long long) blob_bytes);
     check("dec_moe_stage");
 }
@@ -2282,7 +2283,7 @@ void dec_moe_mix_publish(const void* xq, const float* x, int n_tok, int n_embd, 
     const int n16 = n_tok * (n_embd / 32) * (int) sizeof(block_q8_1) / 16;
     const int x16 = work ? n_tok * n_embd / 4 : 0;
     const uint32_t word = ring | (uint32_t) n_tok << 16 | (work ? 1u << 30 : 0u);
-    dm_mix_publish_kernel<<<1, 256, 0, (cudaStream_t) stream>>>((const uint4*) xq, n16, (const uint4*) x, x16, (uint4*) xq_m,
+    basalt::kernels::launch_cc(dm_mix_publish_kernel, 1, 256, 0, (cudaStream_t) stream, (const uint4*) xq, n16, (const uint4*) x, x16, (uint4*) xq_m,
                                                                 (uint4*) x_m, seq_m, word);
     check("dec_moe_mix_publish");
 }
@@ -2297,12 +2298,12 @@ __global__ void dm_mix_combine_kernel(const volatile uint32_t* done_m, uint32_t 
 
 void dec_moe_mix_combine(const volatile uint32_t* done_m, uint32_t ring, const float* part_m, float* out, int count,
                          void* stream) {
-    dm_mix_combine_kernel<<<(count + 255) / 256, 256, 0, (cudaStream_t) stream>>>(done_m, ring, part_m, out, count);
+    basalt::kernels::launch_cc(dm_mix_combine_kernel, (count + 255) / 256, 256, 0, (cudaStream_t) stream, done_m, ring, part_m, out, count);
     check("dec_moe_mix_combine");
 }
 
 void dec_moe_mix_wait(const volatile uint32_t* done_m, uint32_t ring, void* stream) {
-    dm_mix_wait_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(done_m, ring);
+    basalt::kernels::launch_cc(dm_mix_wait_kernel, 1, 1, 0, (cudaStream_t) stream, done_m, ring);
     check("dec_moe_mix_wait");
 }
 
@@ -2427,7 +2428,7 @@ int dec_moe_peer_blocks(bool q2) {
     int dev = 0, sms = 0, coop = 0, per = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
         cudaDeviceGetAttribute(&coop, cudaDevAttrCooperativeLaunch, dev) != cudaSuccess ||
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, dm_peer_fn(q2), kDmThreads, 0) != cudaSuccess) {
+        basalt::kernels::cc_occupancy(&per, dm_peer_fn(q2), kDmThreads, 0) != cudaSuccess) {
         cudaGetLastError();
         return 0;
     }
@@ -2439,7 +2440,7 @@ bool dec_moe_peer_launch(const DmPeerArgs& a, int blocks, void* stream, bool q2)
     DmPeerArgs args = a;
     args.gu2 = 1;
     void* params[] = {&args};
-    const cudaError_t e = cudaLaunchCooperativeKernel(dm_peer_fn(q2, a.mixl != nullptr),
+    const cudaError_t e = basalt::kernels::cc_launch_cooperative(dm_peer_fn(q2, a.mixl != nullptr),
                                                       dim3((unsigned) blocks),
                                                       dim3(kDmThreads), params, 0, (cudaStream_t) stream);
     if (e != cudaSuccess) {
@@ -2512,7 +2513,7 @@ void dm_vram_launch(F kernel, int blocks, void* stream, const DmPlan* plan, cons
     at[0].val.cooperative = 1;
     cfg.attrs = at;
     cfg.numAttrs = 1;
-    const cudaError_t e = cudaLaunchKernelEx(&cfg, kernel, plan, xq, L, gate, up, out, sync);
+    const cudaError_t e = basalt::kernels::cc_launch_ex(&cfg, kernel, plan, xq, L, gate, up, out, sync);
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "dec_moe_vram: %s", cudaGetErrorString(e));
         std::exit(1);
@@ -2535,15 +2536,15 @@ void dec_moe_vram(const NativeExpertLayout& L, const DmPlan* plan, const void* x
         const auto* X = (const block_q8_1*) xq;
         switch (L.gu_type * 10 + NR) {
 #define DM_G(TG) \
-            case TG * 10 + 1: dm_gu_kernel<TG, 1><<<ggu, 256, 0, s>>>(plan, X, L, gate, up); break; \
-            case TG * 10 + 2: dm_gu_kernel<TG, 2><<<ggu, 256, 0, s>>>(plan, X, L, gate, up); break;
+            case TG * 10 + 1: basalt::kernels::launch_cc(dm_gu_kernel<TG, 1>, ggu, 256, 0, s, plan, X, L, gate, up); break; \
+            case TG * 10 + 2: basalt::kernels::launch_cc(dm_gu_kernel<TG, 2>, ggu, 256, 0, s, plan, X, L, gate, up); break;
             DM_GU_FMTS(DM_G)
 #undef DM_G
             default: basalt::log::error("basalt", "dec_moe_vram: gate/up %d rows %d", L.gu_type, NR); std::exit(1);
         }
         block_q8_1* hq = (block_q8_1*) (up + (size_t) kDmCap * L.n_ff);
         const long long nh = (long long) cap * L.n_ff;
-        swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, plan->start, plan->counts,
+        basalt::kernels::launch_cc(swiglu_q8_1_entries_kernel, (unsigned) ((nh + 255) / 256), 256, 0, s, gate, up, plan->start, plan->counts,
                                                                                 (int) L.n_ff, hq);
         const int d_rows = kDown40Type(L.d_type) ? 32 : (L.d_type == 42 ? 16 : 8);
         const dim3 gd((unsigned) ((L.n_embd + d_rows - 1) / d_rows), (unsigned) cap);
@@ -2606,7 +2607,7 @@ void dec_moe_peer_math_test(const NativeExpertLayout& L, const unsigned long lon
     int dev = 0, sms = 0;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
-    dm_test_kernel<<<(unsigned) sms, kDmThreads, 0, (cudaStream_t) stream>>>(L, grp_ptr, start, n_groups, tok, dst,
+    basalt::kernels::launch_cc(dm_test_kernel, (unsigned) sms, kDmThreads, 0, (cudaStream_t) stream, L, grp_ptr, start, n_groups, tok, dst,
                                                                               (const block_q8_1*) xq, gate, up, out, sync);
     check("dec_moe_peer_math_test");
 }

@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -419,12 +420,10 @@ void launch_hit_gu(bool fast, const uint8_t* blob_base, const int32_t* slot_inde
     const int warps = THREADS / 32;
     if (fast) {
         const long long pairs = cap * (long long) FF;
-        gu_pair_kernel<<<(unsigned) ((pairs + warps - 1) / warps), THREADS, 0, cs>>>(
-            blob_base, slot_index, blob_bytes, x_q8_0, x_scales, gate_up, (int) cap, d_count, dst_index, tok_div);
+        basalt::kernels::launch_cc(gu_pair_kernel, (unsigned) ((pairs + warps - 1) / warps), THREADS, 0, cs, blob_base, slot_index, blob_bytes, x_q8_0, x_scales, gate_up, (int) cap, d_count, dst_index, tok_div);
     } else {
         const long long rows = cap * 2LL * FF;
-        gu_kernel<<<(unsigned) ((rows + warps - 1) / warps), THREADS, 0, cs>>>(
-            blob_base, slot_index, blob_bytes, x_q8_0, x_scales, gate_up, (int) cap, d_count, dst_index, tok_div);
+        basalt::kernels::launch_cc(gu_kernel, (unsigned) ((rows + warps - 1) / warps), THREADS, 0, cs, blob_base, slot_index, blob_bytes, x_q8_0, x_scales, gate_up, (int) cap, d_count, dst_index, tok_div);
     }
 }
 
@@ -434,12 +433,10 @@ void launch_hit_down(bool fast, const uint8_t* blob_base, const int32_t* slot_in
     const int warps = THREADS / 32;
     if (fast) {
         const long long pairs = cap * (long long) (H / 2);
-        down_pair_kernel<<<(unsigned) ((pairs + warps - 1) / warps), THREADS, 0, cs>>>(
-            blob_base, slot_index, dst_index, blob_bytes, h_q8_0, h_scales, out, (int) cap, d_count);
+        basalt::kernels::launch_cc(down_pair_kernel, (unsigned) ((pairs + warps - 1) / warps), THREADS, 0, cs, blob_base, slot_index, dst_index, blob_bytes, h_q8_0, h_scales, out, (int) cap, d_count);
     } else {
         const long long rows = cap * (long long) H;
-        down_kernel<<<(unsigned) ((rows + warps - 1) / warps), THREADS, 0, cs>>>(
-            blob_base, slot_index, dst_index, blob_bytes, h_q8_0, h_scales, out, (int) cap, d_count);
+        basalt::kernels::launch_cc(down_kernel, (unsigned) ((rows + warps - 1) / warps), THREADS, 0, cs, blob_base, slot_index, dst_index, blob_bytes, h_q8_0, h_scales, out, (int) cap, d_count);
     }
 }
 
@@ -483,7 +480,7 @@ void moe_hit_grouped_s2(const uint8_t* blob_base, const int32_t* slot_index, con
     {
         const long long pairs = n_hits * (long long) FF;
         const unsigned blocks = (unsigned) ((pairs + THREADS - 1) / THREADS);
-        swiglu_kernel<<<blocks, THREADS, 0, cs>>>(gate_up, pairs);
+        basalt::kernels::launch_cc(swiglu_kernel, blocks, THREADS, 0, cs, gate_up, pairs);
         check("moe_hit_grouped_s2/swiglu", stream);
     }
     // 3. the intermediate's own contract, which is `ggml_mul_mat`'s rule and NOT a choice: the down weight is
@@ -560,7 +557,7 @@ __global__ void add_hits_kernel(float* __restrict__ parts, const float* __restri
 void moe_hit_select(const int32_t* ids, const int32_t* res_row, int k, int n_expert, int32_t* slot, int32_t* dst,
                     int32_t* count, void* stream) {
     if (k < 1 || k > 32) { basalt::log::error("basalt", "moe_hit_select: k must be 1..32"); std::exit(1); }
-    hit_select_kernel<<<1, 32, 0, (cudaStream_t) stream>>>(ids, res_row, k, n_expert, slot, dst, count);
+    basalt::kernels::launch_cc(hit_select_kernel, 1, 32, 0, (cudaStream_t) stream, ids, res_row, k, n_expert, slot, dst, count);
     check("moe_hit_select", stream);
 }
 
@@ -582,7 +579,7 @@ void moe_hit_grouped_s2_dev(const uint8_t* blob_base, const int32_t* slot_index,
     }
     {
         const long long pairs = cap * (long long) FF;
-        swiglu_kernel<<<(unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate_up, pairs);
+        basalt::kernels::launch_cc(swiglu_kernel, (unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs, gate_up, pairs);
         check("moe_hit_grouped_s2_dev/swiglu", stream);
     }
     if (x_scales != nullptr) quantize_q8_0_scaled(gate_up, h_q8_0, h_scales, cap * (int64_t) FF, stream);
@@ -597,7 +594,7 @@ void moe_hit_grouped_s2_dev(const uint8_t* blob_base, const int32_t* slot_index,
 void moe_hit_select_multi(const int32_t* ids, const int32_t* res_row, int n, int n_expert, int32_t* slot, int32_t* dst,
                           int32_t* count, void* stream) {
     if (n < 1 || n > 128) { basalt::log::error("basalt", "moe_hit_select_multi: n must be 1..128"); std::exit(1); }
-    hit_select_multi_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(ids, res_row, n, n_expert, slot, dst, count);
+    basalt::kernels::launch_cc(hit_select_multi_kernel, 1, 128, 0, (cudaStream_t) stream, ids, res_row, n, n_expert, slot, dst, count);
     check("moe_hit_select_multi", stream);
 }
 
@@ -619,7 +616,7 @@ void moe_hit_grouped_s2_multi(const uint8_t* blob_base, const int32_t* slot_inde
     }
     {
         const long long pairs = cap * (long long) FF;
-        swiglu_kernel<<<(unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate_up, pairs);
+        basalt::kernels::launch_cc(swiglu_kernel, (unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs, gate_up, pairs);
         check("moe_hit_grouped_s2_multi/swiglu", stream);
     }
     if (x_scales != nullptr) quantize_q8_0_scaled(gate_up, h_q8_0, h_scales, cap * (int64_t) FF, stream);
@@ -974,7 +971,7 @@ void moe_group_resident(const int32_t* ids, int n, int k_per_tok, const uint8_t*
                         unsigned long long* grp_ptr, int32_t* grp_start, int32_t* counts, int32_t* ent_dst,
                         int32_t* ent_tok, void* stream) {
     if (n < 1 || n > 128) { basalt::log::error("basalt", "moe_group_resident: n must be 1..128"); std::exit(1); }
-    group_resident_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(ids, n, k_per_tok, base, (long long) blob, grp_ptr,
+    basalt::kernels::launch_cc(group_resident_kernel, 1, 128, 0, (cudaStream_t) stream, ids, n, k_per_tok, base, (long long) blob, grp_ptr,
                                                                grp_start, counts, ent_dst, ent_tok);
     check("moe_group_resident", stream);
 }
@@ -993,16 +990,16 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
     {
         const dim3 grid((unsigned) (2 * FF / GU_ROWS), (unsigned) cap_groups);
         if (fast)
-            gu_grouped_t_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_tok, x_q8_0, x_scales,
+            basalt::kernels::launch_cc(gu_grouped_t_kernel, grid, 256, 0, cs, grp_ptr, grp_start, n_groups, ent_tok, x_q8_0, x_scales,
                                                       gate_up, (int) cap_entries);
         else
-            gu_grouped_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_tok, x_q8_0, x_scales, gate_up,
+            basalt::kernels::launch_cc(gu_grouped_kernel, grid, 256, 0, cs, grp_ptr, grp_start, n_groups, ent_tok, x_q8_0, x_scales, gate_up,
                                                     (int) cap_entries);
         check("moe_grouped_s2/gu", stream);
     }
     {
         const long long pairs = cap_entries * (long long) FF;
-        swiglu_kernel<<<(unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate_up, pairs);
+        basalt::kernels::launch_cc(swiglu_kernel, (unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs, gate_up, pairs);
         check("moe_grouped_s2/swiglu", stream);
     }
     if (x_scales != nullptr) quantize_q8_0_scaled(gate_up, h_q8_0, h_scales, cap_entries * (int64_t) FF, stream);
@@ -1011,9 +1008,9 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
         const dim3 grid((unsigned) (H / D_ROWS), (unsigned) cap_groups);
         const float* hs = x_scales != nullptr ? h_scales : nullptr;
         if (fast)
-            down_grouped_t_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_dst, h_q8_0, hs, out);
+            basalt::kernels::launch_cc(down_grouped_t_kernel, grid, 256, 0, cs, grp_ptr, grp_start, n_groups, ent_dst, h_q8_0, hs, out);
         else
-            down_grouped_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_dst, h_q8_0, hs, out);
+            basalt::kernels::launch_cc(down_grouped_kernel, grid, 256, 0, cs, grp_ptr, grp_start, n_groups, ent_dst, h_q8_0, hs, out);
         check("moe_grouped_s2/down", stream);
     }
 }
@@ -1022,7 +1019,7 @@ void moe_hit_add(float* parts, const float* hit_out, const int32_t* dst, const i
                  int64_t n_embd, void* stream) {
     if (cap <= 0) return;
     const dim3 grid((unsigned) ((n_embd + 255) / 256 < 8 ? (n_embd + 255) / 256 : 8), (unsigned) cap);
-    add_hits_kernel<<<grid, 256, 0, (cudaStream_t) stream>>>(parts, hit_out, dst, count, (int) n_embd);
+    basalt::kernels::launch_cc(add_hits_kernel, grid, 256, 0, (cudaStream_t) stream, parts, hit_out, dst, count, (int) n_embd);
     check("moe_hit_add", stream);
 }
 

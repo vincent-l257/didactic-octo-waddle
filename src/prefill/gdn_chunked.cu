@@ -7,6 +7,7 @@
 // Adapted from Infernix (Ian Ranson and contributors), src/ops/linear_attention/gated_delta_net/chunked/,
 // Apache-2.0: see THIRD_PARTY_LICENSES.
 #include "basalt/prefill/kernels.hpp"
+#include "basalt/kernels/sm70_emu.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::prefill {
 namespace {
@@ -54,39 +56,80 @@ __device__ __forceinline__ float ex2(float x) {
 }
 __device__ __forceinline__ uint32_t pack_bf16x2(float lo, float hi) {
     uint32_t out;
+#if BASALT_SM80
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\n" : "=r"(out) : "r"(__float_as_uint(hi)), "r"(__float_as_uint(lo)));
+#else
+    out = basalt::v70::bf16x2_rn(hi, lo);
+#endif
     return out;
 }
 __device__ __forceinline__ void ldsm_x2(unsigned& r0, unsigned& r1, unsigned a) {
+#if BASALT_SM80
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n" : "=r"(r0), "=r"(r1) : "r"(a));
+#else
+    uint32_t r[2];
+    basalt::v70::ldmatrix_s<2>(r, a);
+    r0 = r[0]; r1 = r[1];
+#endif
 }
 __device__ __forceinline__ void ldsm_x4(unsigned& r0, unsigned& r1, unsigned& r2, unsigned& r3, unsigned a) {
+#if BASALT_SM80
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                  : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(a));
+#else
+    uint32_t r[4];
+    basalt::v70::ldmatrix_s<4>(r, a);
+    r0 = r[0]; r1 = r[1]; r2 = r[2]; r3 = r[3];
+#endif
 }
 __device__ __forceinline__ void ldsm_x4_t(unsigned& r0, unsigned& r1, unsigned& r2, unsigned& r3, unsigned a) {
+#if BASALT_SM80
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                  : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(a));
+#else
+    uint32_t r[4];
+    basalt::v70::ldmatrix_trans_s<4>(r, a);
+    r0 = r[0]; r1 = r[1]; r2 = r[2]; r3 = r[3];
+#endif
 }
 __device__ __forceinline__ void mma_bf16(float (&c)[4], unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0,
                                          unsigned b1) {
+#if BASALT_SM80
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                  "{%0,%1,%2,%3};\n"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+#else
+    const uint32_t a[4] = {a0, a1, a2, a3}, b[2] = {b0, b1};
+    basalt::v70::mma_16816<true>(c, a, b);
+#endif
 }
 __device__ __forceinline__ void mma_tf32(float (&c)[4], unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0,
                                          unsigned b1) {
+#if BASALT_SM80
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                  "{%0,%1,%2,%3};\n"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+#else
+    const uint32_t a[4] = {a0, a1, a2, a3}, b[2] = {b0, b1};
+    basalt::v70::mma_tf32_1688(c, a, b);
+#endif
 }
 __device__ __forceinline__ void cp16(void* dst, const void* src, int bytes) {
+#if BASALT_SM80
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(smem_addr(dst)), "l"(src), "r"(bytes));
+#else
+    basalt::v70::copy_z<16>(smem_addr(dst), src, bytes);
+#endif
 }
+#if BASALT_SM80
 __device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n"); }
 template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+#else
+__device__ __forceinline__ void cp_commit() {}
+template <int N> __device__ __forceinline__ void cp_wait() {}
+#endif
 __device__ __forceinline__ float sum16(float v) {
 #pragma unroll
     for (int o = 8; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o, 16);
@@ -413,22 +456,22 @@ void gdn_recurrence(float* state, const float* h, const float* gate, const float
         const int chunks = (int) ((T + CK - 1) / CK);
         QkChunk* qk = static_cast<QkChunk*>(work);
         Control* ctl = reinterpret_cast<Control*>(qk + (int64_t) HK * chunks);
-        gdn_prepare_kernel<<<(unsigned) (HV * chunks), NTH, 0, s>>>(h, gate, beta, eps, (int) T, qk, ctl);
+        basalt::kernels::launch_cc(gdn_prepare_kernel, (unsigned) (HV * chunks), NTH, 0, s, h, gate, beta, eps, (int) T, qk, ctl);
         // the shared-memory opt-in is per device (a layer split runs this on several, from different threads)
         static std::atomic<bool> attr[64];
         int dev = 0;
         cudaGetDevice(&dev);
         if (dev < 0 || dev >= 64) { basalt::log::error("basalt", "gdn_recurrence: device %d out of range", dev); std::abort(); }
         if (!attr[dev].load(std::memory_order_acquire)) {
-            if (cudaFuncSetAttribute(gdn_chunk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+            if (basalt::kernels::cc_func_set_attribute(gdn_chunk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                      (int) sizeof(ChunkShared)) != cudaSuccess) {
                 basalt::log::error("basalt", "gdn_recurrence: shared-memory opt-in failed");
                 std::abort();
             }
             attr[dev].store(true, std::memory_order_release);
         }
-        gdn_chunk_kernel<<<HV * (S / DV), NTH, sizeof(ChunkShared), s>>>(state, h, qk, ctl, y, (int) T);
-        gdn_out_norm_kernel<<<dim3((unsigned) T, HV), S, 0, s>>>(z, gamma, eps, y, y16);
+        basalt::kernels::launch_cc(gdn_chunk_kernel, HV * (S / DV), NTH, sizeof(ChunkShared), s, state, h, qk, ctl, y, (int) T);
+        basalt::kernels::launch_cc(gdn_out_norm_kernel, dim3((unsigned) T, HV), S, 0, s, z, gamma, eps, y, y16);
     }
     check("gdn_recurrence");
 }

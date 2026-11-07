@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -81,7 +82,7 @@ void s2_gemv_q8(const uint8_t* act, const uint8_t* codes, const float* scales, f
         std::exit(1);
     }
     const size_t smem = (size_t) threads_per_row * sizeof(float);
-    s2_gemv_q8_kernel<<<(unsigned) n_out, threads_per_row, smem, (cudaStream_t) stream>>>(act, codes, scales, y,
+    basalt::kernels::launch_cc(s2_gemv_q8_kernel, (unsigned) n_out, threads_per_row, smem, (cudaStream_t) stream, act, codes, scales, y,
                                                                                          n_in, n_out,
                                                                                          threads_per_row);
     const cudaError_t e = cudaGetLastError();

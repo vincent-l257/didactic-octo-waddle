@@ -29,6 +29,7 @@ using namespace basalt::kernels;
 #define mkc mkmid
 #include "attn_chain_kernel.cuh"
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 bool tmap_2d(CUtensorMap* m, const void* base, CUtensorMapDataType ty, uint64_t cols, uint64_t rows, uint64_t stride, uint32_t box_c, uint32_t box_r);
@@ -589,10 +590,10 @@ void mid_chain_init() {
               cudaMemcpyToSymbol(mkb_word, &word, sizeof word) == cudaSuccess;
     for (const int t : {1, 2, 3, 4, XT}) {
         if (!ok) break;
-        ok = cudaFuncSetAttribute((const void*) mid_pick(t, 0, 0, 0), cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_MAX) == cudaSuccess;
-        if (ok) ok = cudaFuncSetAttribute((const void*) mid_pick(t, 0, 0, 0, true), cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_MAX) == cudaSuccess;
-        if (ok) ok = cudaFuncSetAttribute((const void*) mid_pick(t, 14, 14, 14, true), cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_MAX) == cudaSuccess;
-#define X(a, b, c) if (ok) ok = cudaFuncSetAttribute((const void*) mid_pick(t, a, b, c), cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_MAX) == cudaSuccess;
+        ok = basalt::kernels::cc_func_set_attribute((const void*) mid_pick(t, 0, 0, 0), cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_MAX) == cudaSuccess;
+        if (ok) ok = basalt::kernels::cc_func_set_attribute((const void*) mid_pick(t, 0, 0, 0, true), cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_MAX) == cudaSuccess;
+        if (ok) ok = basalt::kernels::cc_func_set_attribute((const void*) mid_pick(t, 14, 14, 14, true), cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_MAX) == cudaSuccess;
+#define X(a, b, c) if (ok) ok = basalt::kernels::cc_func_set_attribute((const void*) mid_pick(t, a, b, c), cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_MAX) == cudaSuccess;
         MID_TRIPLES
 #undef X
     }

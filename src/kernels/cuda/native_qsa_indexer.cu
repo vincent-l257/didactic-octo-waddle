@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -284,11 +285,11 @@ void native_qsa_indexer_append(const float* raw, const int32_t* relative_pos_dev
     const RopeKernelArgs k = scaling.kernel_args(ROT);   // none: the identity constants
     const RopeTab rt = rope_table_for(scaling);
     if (rt.cos != nullptr)
-        append<true><<<1,THREADS,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_base,gamma,epsilon,
+        basalt::kernels::launch_cc(append<true>, 1, THREADS, 0, static_cast<cudaStream_t>(stream), raw,relative_pos_device,pos_base,gamma,epsilon,
             b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
             k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table(),rt);
     else
-        append<false><<<1,THREADS,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_base,gamma,epsilon,
+        basalt::kernels::launch_cc(append<false>, 1, THREADS, 0, static_cast<cudaStream_t>(stream), raw,relative_pos_device,pos_base,gamma,epsilon,
             b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
             k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table(),rt);
     const auto error = cudaGetLastError();
@@ -305,10 +306,10 @@ void native_qsa_indexer_commit_layers(const QsaCommitLayers& a, const QsaShapes&
     const RopeTab rt = rope_table_for(scaling);
     const cudaStream_t st = static_cast<cudaStream_t>(stream);
     if (rt.cos != nullptr)
-        commit_layers<true><<<(unsigned) a.n_layers, THREADS, 0, st>>>(a, theta_scale, k.freq_scale, k.corr_low,
+        basalt::kernels::launch_cc(commit_layers<true>, (unsigned) a.n_layers, THREADS, 0, st, a, theta_scale, k.freq_scale, k.corr_low,
             k.corr_high, k.ext_factor, k.attn_factor, mrope_table(), rt);
     else
-        commit_layers<false><<<(unsigned) a.n_layers, THREADS, 0, st>>>(a, theta_scale, k.freq_scale, k.corr_low,
+        basalt::kernels::launch_cc(commit_layers<false>, (unsigned) a.n_layers, THREADS, 0, st, a, theta_scale, k.freq_scale, k.corr_low,
             k.corr_high, k.ext_factor, k.attn_factor, mrope_table(), rt);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
@@ -324,10 +325,10 @@ void native_qsa_indexer_commit_seg(const QsaSegCommit& a, const QsaShapes& s, co
     const cudaStream_t st = static_cast<cudaStream_t>(stream);
     const dim3 grid((unsigned) a.n_layers, (unsigned) a.n_seg);
     if (rt.cos != nullptr)
-        commit_seg<true><<<grid, THREADS, 0, st>>>(a, theta_scale, k.freq_scale, k.corr_low, k.corr_high, k.ext_factor,
+        basalt::kernels::launch_cc(commit_seg<true>, grid, THREADS, 0, st, a, theta_scale, k.freq_scale, k.corr_low, k.corr_high, k.ext_factor,
                                                    k.attn_factor, mrope_table(), rt);
     else
-        commit_seg<false><<<grid, THREADS, 0, st>>>(a, theta_scale, k.freq_scale, k.corr_low, k.corr_high, k.ext_factor,
+        basalt::kernels::launch_cc(commit_seg<false>, grid, THREADS, 0, st, a, theta_scale, k.freq_scale, k.corr_low, k.corr_high, k.ext_factor,
                                                     k.attn_factor, mrope_table(), rt);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
@@ -348,22 +349,22 @@ void native_qsa_indexer_append_batch(const float* raw, int64_t n, int64_t p0, in
     const RopeTab rt = rope_table_for(scaling);
     if (p0 == 0) {
         if (rt.cos != nullptr)
-            append_first<true><<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale,
+            basalt::kernels::launch_cc(append_first<true>, 1, THREADS, 0, st, raw, gamma, epsilon, b.dead, b.pooled, theta_scale,
                                                       fsf, cl, ch, ef, ms, mtab, rt);
         else
-            append_first<false><<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale,
+            basalt::kernels::launch_cc(append_first<false>, 1, THREADS, 0, st, raw, gamma, epsilon, b.dead, b.pooled, theta_scale,
                                                        fsf, cl, ch, ef, ms, mtab, rt);
     }
     // completed blocks: those whose last cell (4b+3) lies in [p0, p0 + n)
     const int64_t first = p0 <= R - 1 ? 0 : (p0 - (R - 1) + R - 1) / R;       // the smallest b with 4b+3 >= p0
     const int64_t hi = p0 + n - 1 >= R - 1 ? (p0 + n - 1 - (R - 1)) / R : -1;   // the largest b with 4b+3 <= p0+n-1
     if (hi >= first && rt.cos != nullptr)
-        append_blocks<true><<<(unsigned) (hi - first + 1), THREADS, 0, st>>>(raw, n, p0, pos_base, gamma, epsilon,
+        basalt::kernels::launch_cc(append_blocks<true>, (unsigned) (hi - first + 1), THREADS, 0, st, raw, n, p0, pos_base, gamma, epsilon,
             b.tail, b.dead, b.pooled, b.block_pos, first, hi, theta_scale, fsf, cl, ch, ef, ms, mtab, rt);
     else if (hi >= first)
-        append_blocks<false><<<(unsigned) (hi - first + 1), THREADS, 0, st>>>(raw, n, p0, pos_base, gamma, epsilon,
+        basalt::kernels::launch_cc(append_blocks<false>, (unsigned) (hi - first + 1), THREADS, 0, st, raw, n, p0, pos_base, gamma, epsilon,
             b.tail, b.dead, b.pooled, b.block_pos, first, hi, theta_scale, fsf, cl, ch, ef, ms, mtab, rt);
-    append_tail<<<R - 1, D, 0, st>>>(raw, n, p0, b.tail);
+    basalt::kernels::launch_cc(append_tail, R - 1, D, 0, st, raw, n, p0, b.tail);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }

@@ -1,5 +1,6 @@
 // src/kernels/cuda/qsa_prompt_attn.cu - see include/basalt/kernels/qsa_prompt_attn.hpp.
 #include <cstdlib>
+#include "basalt/kernels/sm70_emu.cuh"
 #include <cstring>
 #include "basalt/kernels/qsa_prompt_attn.hpp"
 #include "basalt/kernels/kv_q8.hpp"
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <type_traits>
 #include "basalt/log.hpp"
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -30,10 +32,14 @@ constexpr int QS = HD + 8;        // q row stride in halves (bank-conflict-free 
 
 // m16n8k16 with f16 inputs and FP32 accumulation.
 __device__ __forceinline__ void mma16816(float* c, const uint32_t* a, const uint32_t* b) {
+#if BASALT_SM80
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                  "{%0,%1,%2,%3};\n"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+#else
+    basalt::v70::mma_16816<false>(c, a, b);
+#endif
 }
 
 // Two int8 codes (low byte first) as an exact half2: 1024 + (c + 128) built in the mantissa, minus 1152.
@@ -425,35 +431,61 @@ __device__ __forceinline__ unsigned smem_addr(const void* p) {
     return (unsigned) __cvta_generic_to_shared(p);
 }
 __device__ __forceinline__ void ldsm_x4(uint32_t* r, unsigned a) {
+#if BASALT_SM80
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                  : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
                  : "r"(a));
+#else
+    basalt::v70::ldmatrix_s<4>(r, a);
+#endif
 }
 __device__ __forceinline__ void ldsm_x2(uint32_t* r, unsigned a) {
+#if BASALT_SM80
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n" : "=r"(r[0]), "=r"(r[1]) : "r"(a));
+#else
+    basalt::v70::ldmatrix_s<2>(r, a);
+#endif
 }
 __device__ __forceinline__ void ldsm_x4_t(uint32_t* r, unsigned a) {
+#if BASALT_SM80
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                  : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
                  : "r"(a));
+#else
+    basalt::v70::ldmatrix_trans_s<4>(r, a);
+#endif
 }
 template <int BYTES>
 __device__ __forceinline__ void cp_async_zfill(void* smem, const void* gmem, bool valid) {
     const unsigned sa = smem_addr(smem);
     if constexpr (BYTES == 16) {
+#if BASALT_SM80
         asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(sa), "l"(gmem), "r"(valid ? 16 : 0));
+#else
+        basalt::v70::copy_z<16>(sa, gmem, valid ? 16 : 0);
+#endif
     } else {
+#if BASALT_SM80
         asm volatile("cp.async.ca.shared.global [%0], [%1], 8, %2;\n" ::"r"(sa), "l"(gmem), "r"(valid ? 8 : 0));
+#else
+        basalt::v70::copy_z<8>(sa, gmem, valid ? 8 : 0);
+#endif
     }
 }
 __device__ __forceinline__ void cp_async_commit() {
+#if BASALT_SM80
     asm volatile("cp.async.commit_group;\n" ::);
+#endif
 }
 __device__ __forceinline__ void cp_async_wait1() {
+#if BASALT_SM80
     asm volatile("cp.async.wait_group 1;\n" ::);
+#endif
 }
 __device__ __forceinline__ void cp_async_wait0() {
+#if BASALT_SM80
     asm volatile("cp.async.wait_group 0;\n" ::);
+#endif
 }
 __device__ __forceinline__ float ex2(float x) {
     float y;
@@ -775,7 +807,7 @@ bool launch_i8(const float* q, const QsaAttnPools& pools, const int32_t* ids, co
     const int bytes = (int) sizeof(Smem3);
     if (dev < 0 || dev >= 64) return false;
     if (!attr[dev].load(std::memory_order_acquire)) {
-        if (cudaFuncSetAttribute(prompt_attn_i8_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
+        if (basalt::kernels::cc_func_set_attribute(prompt_attn_i8_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
             cudaSuccess) {
             cudaGetLastError();
             return false;
@@ -785,8 +817,7 @@ bool launch_i8(const float* q, const QsaAttnPools& pools, const int32_t* ids, co
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     for (int64_t q0 = 0; q0 < n_q; q0 += 65535) {
         const int64_t nb = n_q - q0 < 65535 ? n_q - q0 : 65535;
-        prompt_attn_i8_kernel<<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
-            q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
+        basalt::kernels::launch_cc(prompt_attn_i8_kernel, dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st, q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
             (int) s.page_size, scale_log2, attn + q0 * s.n_head * HD, (int) cap);
     }
     const cudaError_t e = cudaGetLastError();
@@ -806,7 +837,7 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
     const int bytes = (int) sizeof(Smem<KV_MODE>);
     if (dev < 0 || dev >= 64) return false;
     if (!attr[dev].load(std::memory_order_acquire)) {
-        if (cudaFuncSetAttribute(prompt_attn_kernel<KV_MODE>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
+        if (basalt::kernels::cc_func_set_attribute(prompt_attn_kernel<KV_MODE>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
             cudaSuccess) {
             cudaGetLastError();
             return false;
@@ -816,8 +847,7 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     for (int64_t q0 = 0; q0 < n_q; q0 += 65535) {
         const int64_t nb = n_q - q0 < 65535 ? n_q - q0 : 65535;
-        prompt_attn_kernel<KV_MODE><<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
-            q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
+        basalt::kernels::launch_cc(prompt_attn_kernel<KV_MODE>, dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st, q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
             (int) s.page_size, scale_log2, attn + q0 * s.n_head * HD, (int) cap);
     }
     const cudaError_t e = cudaGetLastError();

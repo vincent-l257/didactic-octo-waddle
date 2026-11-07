@@ -77,6 +77,9 @@ endif()
 
 # The `warnings` and `platform` targets, one file shared with the standalone `tools/vision` configuration.
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/platform.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/sm70_cubins.cmake)
+# where the programs (and the sm70/ cubins) are written; a second build can point elsewhere while bin/ is in use
+set(BASALT_BIN_DIR "${CMAKE_SOURCE_DIR}/bin" CACHE PATH "output directory of the programs")
 
 # The application manifest, for every program that names a file path in its command line. Windows decodes argv and
 # the CRT's narrow opens in the machine's ANSI code page unless the image says otherwise, so the same pack path
@@ -163,12 +166,12 @@ target_link_libraries(basalt-plan PRIVATE plan)
 
 # ---- core (GPU runtime) ---------------------------------------------
 add_library(core STATIC src/core/device.cu src/core/pinned.cu src/core/graph.cpp src/core/weights.cpp src/core/direct_upload.cpp
-                             src/core/layout.cpp src/core/model_file.cpp)
+                             src/core/layout.cpp src/core/model_file.cpp src/core/sm70_cubins.cpp)
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # The selected runtime is PUBLIC because graph.cpp is a HOST translation unit that calls cudaGraphLaunch and
 # cudaEventQuery: the .cu sources get cudart through the CUDA language rules, a .cpp does not, and the
 # linker error ("unresolved external symbol cudaGraphInstantiate") names the function rather than the cause.
-target_link_libraries(core PUBLIC plan artifact platform warnings ${_gpu_runtime_target})
+target_link_libraries(core PUBLIC plan artifact platform warnings ${_gpu_runtime_target} CUDA::cuda_driver)
 
 add_executable(basalt-device src/core/device_main.cpp)
 target_link_libraries(basalt-device PRIVATE core)
@@ -525,7 +528,7 @@ add_executable(basalt src/program/generate.cpp src/program/engine_local.cpp src/
                        src/program/cli/options.cpp src/program/cli/control_vectors.cpp
                        src/program/cli/startup.cpp src/program/cli/gpu.cpp src/program/cli/tokens.cpp
                        src/program/cli/report.cpp)
-set_target_properties(basalt PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+set_target_properties(basalt PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${BASALT_BIN_DIR})
 target_include_directories(basalt PRIVATE ${_gpu_include_directories})
 target_link_libraries(basalt PRIVATE engine engine_session grammar tokenizer prefill spec ${_gpu_runtime_target})
 basalt_embed_manifest(basalt)
@@ -572,7 +575,7 @@ basalt_embed_manifest(tokenizer_bench)
 basalt_cpu_test(NAME tokenizer_test COMMAND tokenizer_test)
 set_tests_properties(tokenizer_test PROPERTIES TIMEOUT 60)
 add_executable(basalt-bench src/program/bench_main.cpp)
-set_target_properties(basalt-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+set_target_properties(basalt-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${BASALT_BIN_DIR})
 # the image encoder sidecar, bin/basalt-vision (its own project, built with this one)
 add_subdirectory(tools/vision)
 target_link_libraries(basalt PRIVATE vision_cuda)
@@ -596,7 +599,7 @@ target_compile_definitions(basalt-bench PRIVATE
 
 # basalt-probe: starts the engine, measures its rates and cold decode speed, prints a report
 add_executable(basalt-probe src/program/probe_main.cpp)
-set_target_properties(basalt-probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+set_target_properties(basalt-probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${BASALT_BIN_DIR})
 add_dependencies(basalt-probe basalt)
 target_link_libraries(basalt-probe PRIVATE engine_session platform warnings ${CMAKE_DL_LIBS})
 basalt_embed_manifest(basalt-probe)
@@ -1323,7 +1326,7 @@ target_compile_options(mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda 
 if(MSVC)
   target_compile_options(mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
 endif()
-target_link_libraries(mmq PUBLIC ggml_quants ${_gpu_runtime_target})
+target_link_libraries(mmq PUBLIC ggml_quants core ${_gpu_runtime_target})
 target_link_libraries(prefill PUBLIC mmq)
 # the FP4 block-scaled tensor-core experts (need the a-variant of the architecture)
 add_library(fp4 STATIC src/prefill/fp4/moe_fp4.cu)
@@ -1331,6 +1334,9 @@ set_target_properties(fp4 PROPERTIES CUDA_ARCHITECTURES 120a-real)
 target_include_directories(fp4 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(fp4 PUBLIC mmq ${_gpu_runtime_target})
 target_link_libraries(prefill PUBLIC fp4)
+# a cc 7.0 card's kernels: everything but the sm_90+ and FP4 tensor-core files, which its paths never launch
+basalt_sm70_cubins(TARGETS core kernels prefill mmq OUT "${BASALT_BIN_DIR}/sm70"
+                   EXCLUDE hc_fused.cu dense_tc.cu moe_fp4.cu)
 if(BUILD_TESTING)
   # the fused int8 experts against a double-precision reference and the MMQ path (exit 77 without int8 tensor cores)
   add_executable(prefill_fused_moe_test tests/cuda/prefill_fused_moe_test.cpp)

@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include "basalt/kernels/cc_launch.hpp"
 
 namespace basalt::kernels {
 namespace {
@@ -91,9 +92,9 @@ void native_gr_rms_norm_weighted(const float* input, const float* gamma, float* 
     check_pointer(output);
     const auto cuda_stream = static_cast<cudaStream_t>(stream);
     if (n_cols < 1024)
-        weighted_rms_norm<256><<<unsigned(n_rows), 256, 0, cuda_stream>>>(input, gamma, output, n_cols, epsilon);
+        basalt::kernels::launch_cc(weighted_rms_norm<256>, unsigned(n_rows), 256, 0, cuda_stream, input, gamma, output, n_cols, epsilon);
     else
-        weighted_rms_norm<1024><<<unsigned(n_rows), 1024, 0, cuda_stream>>>(input, gamma, output, n_cols, epsilon);
+        basalt::kernels::launch_cc(weighted_rms_norm<1024>, unsigned(n_rows), 1024, 0, cuda_stream, input, gamma, output, n_cols, epsilon);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess)
         throw std::runtime_error(std::string("native GR RMSNorm launch: ") + cudaGetErrorString(error));
