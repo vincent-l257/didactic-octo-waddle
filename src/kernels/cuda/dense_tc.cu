@@ -493,26 +493,38 @@ __device__ __forceinline__ void dense_tc_tile_block(int blk, int nblk, uint8_t* 
         if (rs == row_bytes) {
             const uint32_t bytes = (uint32_t) ((rows * row_bytes + 15) & ~15);
             if (lane == 0) {
+                #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
                 asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(bb), "r"(bytes) : "memory");
+                #endif
+                #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
                 asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                              ::"r"(sb), "l"(w + (size_t) tile * tb), "r"(bytes), "r"(bb) : "memory");
+                #endif
             }
         } else {
             if (lane == 0)
+                #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
                 asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(bb),
                              "r"((uint32_t) (rows * row_bytes)) : "memory");
+                #endif
             __syncwarp();
             if (lane < rows)
+                #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
                 asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                              ::"r"(sb + (uint32_t) (lane * rs)), "l"(w + (size_t) tile * tb + (size_t) lane * row_bytes),
                              "r"((uint32_t) row_bytes), "r"(bb) : "memory");
+                #endif
         }
     };
     if (wp == 0) {
         if (lane == 0) {
             for (int q = 0; q < 2; ++q)
+                #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
                 asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" ::"r"((uint32_t) __cvta_generic_to_shared(bar + q)));
+                #endif
+            #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
             asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+            #endif
         }
         __syncwarp();
             for (int i = 0; i < 2 && i < mine; ++i) issue(i);
@@ -528,8 +540,10 @@ __device__ __forceinline__ void dense_tc_tile_block(int blk, int nblk, uint8_t* 
             uint32_t done = 0;
             const uint32_t bb = (uint32_t) __cvta_generic_to_shared(bar + (i & 1)), par = (uint32_t) (i >> 1) & 1u;
             do {
+                #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
                 asm volatile("{\n .reg .pred p;\n mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
                              " selp.u32 %0, 1, 0, p;\n}" : "=r"(done) : "r"(bb), "r"(par) : "memory");
+                #endif
             } while (!done);
         }
         const uint8_t* slot = slots + (size_t) (i & 1) * ts;
@@ -567,7 +581,9 @@ __device__ __forceinline__ void dense_tc_tile_block(int blk, int nblk, uint8_t* 
         if (i == mine - 1) pdl_launch_dependents();
         __syncthreads();   // the slot is read and the warp sums are in
         if (wp == 0 && i + 2 < mine) {
+            #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
             asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+            #endif
             issue(i + 2);
         }
         if (tid < 16 * kMaxCols) {
@@ -621,17 +637,25 @@ __device__ __forceinline__ void dense_tc_one_block(int blk, uint8_t* smem, const
     if constexpr (TYPE == 21)
         for (int i = tid; i < 512; i += NW * 32) grid[i] = iq3s_grid[i];
     if (tid == 0) {
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" ::"r"(bb));
+        #endif
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+        #endif
         // rows past n_out are not copied (and never stored)
+            #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
             asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(bb), "r"((uint32_t) (rows * row_bytes))
                          : "memory");
+            #endif
     }
     __syncthreads();
     if (tid < rows)   // one bulk copy per row, at a stride that spreads the rows over the banks
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                      ::"r"((uint32_t) __cvta_generic_to_shared(slot + tid * rs)),
                      "l"(w + (size_t) (row0 + tid) * row_bytes), "r"((uint32_t) row_bytes), "r"(bb) : "memory");
+        #endif
     pdl_wait();
     const uint32_t* tbl = reinterpret_cast<const uint32_t*>(dtc_iq4nl);
     uint32_t t0 = 0, t1 = 0, t2 = 0, t3 = 0;
@@ -662,8 +686,10 @@ __device__ __forceinline__ void dense_tc_one_block(int blk, uint8_t* smem, const
     {
         uint32_t done = 0;
         do {
+            #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
             asm volatile("{\n .reg .pred p;\n mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
                          " selp.u32 %0, 1, 0, p;\n}" : "=r"(done) : "r"(bb), "r"(0u) : "memory");
+            #endif
         } while (!done);
     }
     pdl_launch_dependents();
@@ -852,14 +878,22 @@ __device__ __forceinline__ void dense_tc_pair_block(int blk, int nblk, uint8_t* 
         const uint32_t bytes = (uint32_t) ((rows * row_bytes + 15) & ~15);
         const uint32_t sb = (uint32_t) __cvta_generic_to_shared(slots + (size_t) (i & 1) * slot_bytes);
         const uint32_t bb = (uint32_t) __cvta_generic_to_shared(bar + (i & 1));
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(bb), "r"(bytes) : "memory");
+        #endif
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                      ::"r"(sb), "l"(m.w + (size_t) lt * 16 * row_bytes), "r"(bytes), "r"(bb) : "memory");
+        #endif
     };
     if (tid == 0) {
         for (int q = 0; q < 2; ++q)
+            #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
             asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" ::"r"((uint32_t) __cvta_generic_to_shared(bar + q)));
+            #endif
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+        #endif
             for (int i = 0; i < 2 && i < mine; ++i) issue(i);
     }
     __syncthreads();
@@ -880,8 +914,10 @@ __device__ __forceinline__ void dense_tc_pair_block(int blk, int nblk, uint8_t* 
             uint32_t done = 0;
             const uint32_t bb = (uint32_t) __cvta_generic_to_shared(bar + (i & 1)), par = (uint32_t) (i >> 1) & 1u;
             do {
+                #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
                 asm volatile("{\n .reg .pred p;\n mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
                              " selp.u32 %0, 1, 0, p;\n}" : "=r"(done) : "r"(bb), "r"(par) : "memory");
+                #endif
             } while (!done);
         }
         const uint8_t* slot = slots + (size_t) (i & 1) * slot_bytes;
@@ -936,7 +972,9 @@ __device__ __forceinline__ void dense_tc_pair_block(int blk, int nblk, uint8_t* 
         if (i == mine - 1) pdl_launch_dependents();
         __syncthreads();   // the slot is read and the warp sums are in
         if (tid == 0 && i + 2 < mine) {
+            #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
             asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+            #endif
             issue(i + 2);
         }
         if (tid < 16 * kMaxCols) {
@@ -974,7 +1012,9 @@ __global__ void __launch_bounds__(32) dense_tc_l2_kernel(const uint8_t* __restri
                      hi = (size_t) (blockIdx.x + 1) * n16 / gridDim.x * 16;
         for (size_t o = lo; o < hi; o += 65536) {
             const unsigned sz = (unsigned) (hi - o < 65536 ? hi - o : 65536);
+            #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
             asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(w + o), "r"(sz) : "memory");
+            #endif
         }
     }
     pdl_launch_dependents();
@@ -1106,11 +1146,27 @@ void launch(const void* w, const void* x, float* y, int n_in, int n_out, int nco
 }  // namespace
 #ifndef FZ_DEV_ONLY   // host side: another translation unit (the mid chain) takes only the device code
 
+// The tensor-core dense kernels are Hopper/Blackwell. Ampere (the peer card of a layer split) takes native_mmvq.
+static bool dense_tc_device_ok() noexcept {
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) return false;
+    static int ok[64] = {};
+    if (ok[dev] == 0) {
+        int major = 0;
+        const bool yes = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major >= 9;
+        cudaGetLastError();
+        ok[dev] = yes ? 1 : 2;
+    }
+    return ok[dev] == 1;
+}
+
 bool dense_tc_supported(int t, int n_in) noexcept {
+    if (!dense_tc_device_ok()) return false;
     return n_in > 0 && n_in % 512 == 0 && (t == 12 || t == 13 || t == 14 || t == 23 || t == 11 || t == 42 || t == 8);
 }
 
 bool dense_tc_supported(int t, int n_in, int n_out, const void* w) noexcept {
+    if (!dense_tc_device_ok()) return false;
     if (t == 21) return n_in > 0 && n_in % 512 == 0 && n_out > 0 && one_ok<21>(w, n_in, n_out);
     return dense_tc_supported(t, n_in);
 }
@@ -1145,6 +1201,7 @@ void dense_tc(int type, const void* w, const void* x, float* y, int n_in, int n_
 }
 
 bool dense_tc_pair_supported(int t0, int t1, int n_in) noexcept {
+    if (!dense_tc_device_ok()) return false;
     auto ok = [&](int t) { return t == 12 || t == 13 || t == 14 || t == 21 || t == 23 || t == 11 || t == 42 || t == 8; };
     if (!ok(t0) || !ok(t1) || n_in <= 0 || n_in % 512 != 0) return false;
     const int tb = 16 * (n_in / 256) * std::max(sb_bytes_lq(t0), sb_bytes_lq(t1));

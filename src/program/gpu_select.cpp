@@ -133,7 +133,11 @@ bool parse_gpu_spec(const std::string& text, GpuSpec& out, std::string& err) {
     return true;
 }
 
-bool gpu_supported(const GpuCard& c) { return c.cc_major == 0 || (c.cc_major == 12 && c.cc_minor == 0); }
+static bool gpu_main(const GpuCard& c) { return c.cc_major == 0 || (c.cc_major == 12 && c.cc_minor == 0); }
+
+static bool gpu_ampere_peer(const GpuCard& c) { return c.cc_major == 8 && c.cc_minor == 6; }
+
+bool gpu_supported(const GpuCard& c) { return gpu_main(c) || gpu_ampere_peer(c); }
 
 std::string gpu_label(const std::vector<GpuCard>& visible, int index) {
     std::string s = "GPU " + std::to_string(index);
@@ -154,31 +158,34 @@ GpuChoice choose_gpus(const GpuSpec& spec, const std::vector<GpuCard>& visible, 
             c.error = "gpu auto: GPUs not listable (no NVML)";
             return c;
         }
-        std::vector<int> ok;
+        std::vector<int> mains, peers;
         for (int i = 0; i < n; ++i) {
-            if (gpu_supported(visible[(size_t) i])) ok.push_back(i);
+            if (gpu_main(visible[(size_t) i])) mains.push_back(i);
+            else if (gpu_ampere_peer(visible[(size_t) i])) peers.push_back(i);
             else c.notes.push_back("gpu auto: " + gpu_label(visible, i) + " skipped, not sm_120");
         }
-        if (ok.empty()) {
+        if (mains.empty()) {
             c.error = n == 0 ? "gpu auto: no GPU is visible" : "gpu auto: no sm_120 GPU visible";
             return c;
         }
-        // the main card: the most memory bandwidth, then the most VRAM, then the lowest number
-        int best = ok[0];
-        for (int i : ok) {
+        // the main card is the fastest Blackwell card. An sm_86 peer can have more memory bandwidth
+        // and must not take the main slot: its image does not have the main card's kernels.
+        int best = mains[0];
+        for (int i : mains) {
             const GpuCard& a = visible[(size_t) i];
             const GpuCard& b = visible[(size_t) best];
             if (a.mem_gbps > b.mem_gbps || (a.mem_gbps == b.mem_gbps && a.vram > b.vram)) best = i;
         }
         c.cards.push_back(best);
-        for (int i : ok)
+        for (int i : mains)
             if (i != best) c.cards.push_back(i);
+        for (int i : peers) c.cards.push_back(i);
         return c;
     }
     if (spec.kind == GpuSpec::Kind::Unset) {
         if (known && n == 0) { c.error = "gpu: no GPU is visible"; return c; }
         c.cards.push_back(0);
-        if (known && !gpu_supported(visible[0])) {
+        if (known && !gpu_main(visible[0])) {
             c.error = unsupported(0);
             return c;
         }
@@ -204,7 +211,13 @@ GpuChoice choose_gpus(const GpuSpec& spec, const std::vector<GpuCard>& visible, 
             c.cards.clear();
             return c;
         }
-        if (known && !gpu_supported(visible[(size_t) i])) {
+        const bool lead = c.cards.empty();
+        if (known && lead && !gpu_main(visible[(size_t) i])) {
+            c.error = unsupported(i);
+            c.cards.clear();
+            return c;
+        }
+        if (known && !lead && !gpu_supported(visible[(size_t) i])) {
             c.error = unsupported(i);
             c.cards.clear();
             return c;

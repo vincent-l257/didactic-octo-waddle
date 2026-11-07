@@ -70,7 +70,11 @@ __device__ __forceinline__ void barn(int id, int n) { asm volatile("bar.sync %0,
 #define mwait(b, p) mkb_mwait(smem_u32(b), p, __LINE__)
 // thread / block index read opaquely: values derived from them are recomputed per phase instead of being hoisted
 // out of the layer loop (and spilled: a local-memory reload after an acquire is an L2 round trip)
-__device__ __forceinline__ void pfence() { asm volatile("fence.proxy.async.shared::cta;" ::: "memory"); }
+__device__ __forceinline__ void pfence() {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+#endif
+}
 __device__ __forceinline__ void spin_ge(const unsigned* c, unsigned target) {
     if (ldacq(c) < target) {
         const unsigned long long t0_ = mkb_now();
@@ -80,7 +84,9 @@ __device__ __forceinline__ void spin_ge(const unsigned* c, unsigned target) {
 }
 __device__ __forceinline__ void hop_copy(const unsigned* ctr, unsigned target, void* dst, const void* src, unsigned bytes, uint64_t* bar) {
     spin_ge(ctr, target);
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("fence.proxy.async.global;" ::: "memory");
+    #endif
     pfence();
     mbar_expect_tx(bar, bytes);
     bulk_g2s(dst, src, bytes, bar);
@@ -90,7 +96,9 @@ __device__ __forceinline__ void pf_l2(const void* p, size_t n) {   // n multiple
 #pragma unroll 1
     for (size_t o = 0; o < n; o += 32768) {
         const unsigned sz = (unsigned) (n - o < 32768 ? n - o : 32768);
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(c + o), "r"(sz) : "memory");
+        #endif
     }
 }
 
@@ -119,8 +127,10 @@ __device__ __forceinline__ void bulk_w2s(void* dst, const void* src, unsigned by
 #else
     uint64_t pol;
     asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol));
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1], %2, [%3], %4;"
                  ::"r"(smem_u32(dst)), "l"(src), "r"(bytes), "r"(smem_u32(bar)), "l"(pol) : "memory");
+    #endif
 #endif
 }
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900

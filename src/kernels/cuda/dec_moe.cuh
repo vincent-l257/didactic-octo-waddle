@@ -1853,15 +1853,24 @@ struct DmTmaShared {
 
 __device__ __forceinline__ uint32_t dm_smem(const void* p) { return (uint32_t) __cvta_generic_to_shared(p); }
 __device__ __forceinline__ void dm_bulk(void* dst, const void* src, uint32_t bytes, unsigned long long* bar) {
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(dm_smem(bar)), "r"(bytes) : "memory");
+    #endif
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                  :: "r"(dm_smem(dst)), "l"(src), "r"(bytes), "r"(dm_smem(bar)) : "memory");
+    #endif
 }
 __device__ __forceinline__ void dm_bar_wait(unsigned long long* bar, uint32_t parity) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     uint32_t ok = 0;
     while (!ok)
         asm volatile("{ .reg .pred p; mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }"
                      : "=r"(ok) : "r"(dm_smem(bar)), "r"(parity) : "memory");
+#else
+    (void) bar;
+    (void) parity;
+#endif
 }
 
 // sm's groups (ng, start, gptr, tok, dst set) through the bulk-copy pipeline: block b of nb takes items b, b + nb, ...
@@ -1899,7 +1908,9 @@ __device__ int dm_experts_tma(DmTmaShared& sm, int ng, const block_q8_1* __restr
         if (k > 0) __syncthreads();              // stage (k - 1) is consumed: refill it
         if (tid == 0) {
             // the warps read the stage with generic loads; the refill is an async-proxy write
+            #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
             asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+            #endif
             issue(k + kTmaStages - 1);
         }
         const int st = (base + k) % kTmaStages;
@@ -1947,9 +1958,14 @@ __device__ int dm_experts_tma(DmTmaShared& sm, int ng, const block_q8_1* __restr
 
 __device__ __forceinline__ void dm_bars_init(DmTmaShared& sm) {
     if (threadIdx.x == 0) {
-        for (int i = 0; i < kTmaStages; ++i)
+        for (int i = 0; i < kTmaStages; ++i) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
             asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "r"(dm_smem(&sm.bar[i])) : "memory");
+#endif
+        }
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+        #endif
     }
 }
 

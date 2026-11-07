@@ -744,11 +744,21 @@ constexpr int CL_MAXQ = 16;    // larger calls (prefill sub-batches) fill the GP
 #endif
 
 #if SEL_CLUSTER
-__device__ __forceinline__ void cl_arrive() { asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void cl_wait() { asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory"); }
+__device__ __forceinline__ void cl_arrive() {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
+    asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void cl_wait() {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
+    asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory");
+#endif
+}
 __device__ __forceinline__ unsigned cl_rank() {
     unsigned r;
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r));
+    #endif
     return r;
 }
 // exclusive block scan of a 64-bit value over CL_T threads; `total` = the CTA's sum
@@ -783,35 +793,49 @@ __device__ __forceinline__ unsigned long long cl_excl_scan64(unsigned long long 
 #if SEL_CLUSTER
 __device__ __forceinline__ uint32_t smem_u32(const void* p) { return (uint32_t) __cvta_generic_to_shared(p); }
 __device__ __forceinline__ void mbar_init(uint32_t a, int count) {
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(a), "r"(count) : "memory");
+    #endif
 }
 __device__ __forceinline__ void mbar_expect(uint32_t a, uint32_t bytes) {
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(a), "r"(bytes) : "memory");
+    #endif
 }
 __device__ __forceinline__ void mbar_wait(uint32_t a) {   // phase 0 of a barrier used once
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile(
         "{\n .reg .pred P1;\n LAB_WAIT:\n mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], 0;\n @P1 bra DONE;\n bra LAB_WAIT;\n DONE:\n}\n" ::"r"(a)
         : "memory");
+    #endif
 }
 __device__ __forceinline__ uint32_t cl_map32(uint32_t a, unsigned rank) {   // a in CTA `rank`'s shared memory
     uint32_t o;
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("mapa.shared::cluster.u32 %0, %1, %2;\n" : "=r"(o) : "r"(a), "r"(rank));
+    #endif
     return o;
 }
 // stores into another CTA's shared memory that add their bytes to that CTA's mbarrier
 __device__ __forceinline__ void st_async4(uint32_t dst, int4 v, uint32_t dst_bar) {
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("st.async.weak.shared::cluster.mbarrier::complete_tx::bytes.v4.b32 [%0], {%1, %2, %3, %4}, [%5];\n" ::"r"(dst),
                  "r"(v.x), "r"(v.y), "r"(v.z), "r"(v.w), "r"(dst_bar)
                  : "memory");
+    #endif
 }
 __device__ __forceinline__ void st_async1(uint32_t dst, int v, uint32_t dst_bar) {
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("st.async.weak.shared::cluster.mbarrier::complete_tx::bytes.b32 [%0], %1, [%2];\n" ::"r"(dst), "r"(v), "r"(dst_bar)
                  : "memory");
+    #endif
 }
 __device__ __forceinline__ void st_async2(uint32_t dst, unsigned long long v, uint32_t dst_bar) {
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("st.async.weak.shared::cluster.mbarrier::complete_tx::bytes.v2.b32 [%0], {%1, %2}, [%3];\n" ::"r"(dst),
                  "r"((uint32_t) v), "r"((uint32_t) (v >> 32)), "r"(dst_bar)
                  : "memory");
+    #endif
 }
 #endif
 
@@ -839,7 +863,9 @@ __global__ void __launch_bounds__(CL_T) block_topk_cluster_kernel(const float* _
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
     if (t == 0) {
         for (int i = 0; i < 13; ++i) mbar_init(smem_u32(&mbar[i]), 1);
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory");
+        #endif
         for (int i = 0; i < 4; ++i) {
             mbar_expect(smem_u32(&mbar[3 * i]), CL_N * 64);
             mbar_expect(smem_u32(&mbar[3 * i + 1]), CL_N * 4);

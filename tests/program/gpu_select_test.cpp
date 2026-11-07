@@ -113,15 +113,15 @@ int main() {
         const std::vector<GpuCard> v = {card(0, "RTX 5070 Ti", 12, 0, 896, 16), card(1, "RTX 3090", 8, 6, 936, 24),
                                         card(2, "RTX 5090", 12, 0, 1792, 32), card(3, "RTX 5060 Ti", 12, 0, 448, 16)};
         GpuChoice c = pick("auto", v);
-        CHECK_STR(cards(c), "2,0,3");
-        CHECK(c.notes.size() == 1);
-        if (c.notes.size() == 1) CHECK_STR(c.notes[0], "gpu auto: GPU 1 (RTX 3090) skipped, not sm_120");
-        CHECK_STR(roles(v, c, 1), "main,expert tier,idle");
-        CHECK_STR(roles(v, c, 3), "main,expert tier,expert tier");
+        CHECK_STR(cards(c), "2,0,3,1");
+        CHECK(c.notes.empty());
+        CHECK_STR(roles(v, c, 1), "main,expert tier,idle,idle");
+        CHECK_STR(roles(v, c, 3), "main,expert tier,expert tier,expert tier");
         c = pick("", v);
         CHECK_STR(cards(c), "0");
-        CHECK_STR(c.warning, "GPU 2 (RTX 5090), GPU 3 (RTX 5060 Ti) unused; use gpu 0,2,3 or gpu auto");
+        CHECK_STR(c.warning, "GPU 1 (RTX 3090), GPU 2 (RTX 5090), GPU 3 (RTX 5060 Ti) unused; use gpu 0,1,2,3 or gpu auto");
         CHECK_STR(pick("1", v).error, "gpu: GPU 1 (RTX 3090) is sm_86, not sm_120");
+        CHECK_STR(cards(pick("0,1", v)), "0,1");
         CHECK_STR(cards(pick("3,2,0", v)), "3,2,0");
     }
     // A laptop's own card beside a desktop card in an enclosure: the desktop card's bandwidth makes it main; the

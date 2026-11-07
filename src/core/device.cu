@@ -146,11 +146,12 @@ DeviceInfo device_info(int ordinal) {
     check(cudaDriverGetVersion(&d.driver_version), "cudaDriverGetVersion");
     check(cudaRuntimeGetVersion(&d.runtime_version), "cudaRuntimeGetVersion");
 
-    // The binary holds code for one compute capability only; a card of another compute capability is refused here rather than failing
-    // at its first kernel launch.
-    if (d.cc_major != 12 || d.cc_minor != 0) {
+    // sm_120 runs the main card. sm_86 is the Ampere peer image. Anything else has no cubin.
+    const bool blackwell = d.cc_major == 12 && d.cc_minor == 0;
+    const bool ampere = d.cc_major == 8 && d.cc_minor == 6;
+    if (!blackwell && !ampere) {
         throw CudaError("device " + d.name + " reports compute capability " + std::to_string(d.cc_major) + "." +
-                            std::to_string(d.cc_minor) + "; basalt needs an NVIDIA GPU of compute capability 12.0",
+                            std::to_string(d.cc_minor) + "; basalt needs compute capability 12.0, or 8.6 as a peer",
                         -1);
     }
     return d;

@@ -168,7 +168,7 @@ __device__ __forceinline__ void rec_sync() {
 // head's raw output goes to a.o for dec_gdn_rec_norm.
 template<int MAXT, bool SPLIT, bool SUB = false>
 __device__ __forceinline__ void rec_block(const DecRecArgs& a, int T, int head, int rank, RecSmem& sm,
-                                          cg::cluster_group* cluster) {
+                                          void* cluster_ptr) {
     const int rg = threadIdx.x / 32, lane = threadIdx.x % 32, tid = threadIdx.x;
     stamp(a, 0);
     const int col = rank * 32 + lane;
@@ -200,9 +200,14 @@ __device__ __forceinline__ void rec_block(const DecRecArgs& a, int T, int head, 
     asm volatile("cp.async.commit_group;" ::: "memory");
     const float dt = a.dt[gh], sa = a.ssm_a[gh], gam = a.gamma[col];
     stamp(a, 1);
-    if (a.early_trigger) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");   // the out projection may stage its weights
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
+    if (a.early_trigger) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    #endif
+   // the out projection may stage its weights
     // this block has started: the barrier the ranks wait on before writing into each other's shared memory
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     if (!SPLIT) asm volatile("barrier.cluster.arrive.relaxed.aligned;" ::: "memory");
+    #endif
     // alpha and beta read only the hc output and constants, both complete before this kernel can launch (its
     // predecessor passed its own wait on the hc read), so they are computed while the projections still run
     asm volatile("cp.async.wait_all;" ::: "memory");
@@ -314,13 +319,23 @@ __device__ __forceinline__ void rec_block(const DecRecArgs& a, int T, int head, 
     if (SPLIT) return;
     // every rank's sums of squares, pushed into every rank's shared memory (once every rank has started) before one
     // cluster barrier
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("barrier.cluster.wait.aligned;" ::: "memory");
+    #endif
     if (rg == 0) {
         const int t = lane / 4, r = lane % 4;
         const float v = __shfl_sync(0xffffffffu, wsum_t, t);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+        auto* cluster = static_cast<cg::cluster_group*>(cluster_ptr);
         if (t < T) *cluster->map_shared_rank(&sm.wsum[t][rank], r) = v;
+#else
+        (void) cluster_ptr;
+        (void) v;
+#endif
     }
-    cluster->sync();
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    static_cast<cg::cluster_group*>(cluster_ptr)->sync();
+#endif
     stamp(a, 7);
 
     // ---- the gated RMS norm and the q8_1 of the output: one warp, one q8_1 block per token
@@ -337,11 +352,18 @@ __device__ __forceinline__ void rec_block(const DecRecArgs& a, int T, int head, 
 }
 
 template<int MAXT>
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
 __global__ void __cluster_dims__(4, 1, 1) __launch_bounds__(S) rec_kernel(const DecRecArgs a, int T) {
     __shared__ RecSmem sm;
     cg::cluster_group cl = cg::this_cluster();
     rec_block<MAXT, false>(a, T, blockIdx.x / 4, blockIdx.x % 4, sm, &cl);
 }
+#else
+__global__ void __launch_bounds__(S) rec_kernel(const DecRecArgs a, int T) {
+    (void) a;
+    (void) T;
+}
+#endif
 
 template<int MAXT>
 __global__ void __launch_bounds__(S) rec_split_kernel(const DecRecArgs a, int T) {
@@ -352,6 +374,7 @@ __global__ void __launch_bounds__(S) rec_split_kernel(const DecRecArgs a, int T)
 // rec_kernel over a segmented window: cluster row y is a window row, of which only a segment's first works, on the
 // segment's rows and state
 template<int MAXT>
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
 __global__ void __cluster_dims__(4, 1, 1) __launch_bounds__(S) rec_seg_kernel(const DecRecArgs a0, const SegRow* rows,
                                                                               size_t state_off) {
     const SegRow r = rows[blockIdx.y];
@@ -367,6 +390,13 @@ __global__ void __cluster_dims__(4, 1, 1) __launch_bounds__(S) rec_seg_kernel(co
     a.yq = static_cast<char*>(a.yq) + r0 * (vd / 32) * sizeof(Q81);
     rec_block<MAXT, false>(a, r.n, blockIdx.x / 4, blockIdx.x % 4, sm, &cl);
 }
+#else
+__global__ void __launch_bounds__(S) rec_seg_kernel(const DecRecArgs a0, const SegRow* rows, size_t state_off) {
+    (void) a0;
+    (void) rows;
+    (void) state_off;
+}
+#endif
 
 // one warp per (token, value head): the head's four 32-value sums of squares in rank order, then norm_q8 per rank
 __global__ void __launch_bounds__(128) rec_norm_kernel(const DecRecArgs a, int T) {
@@ -398,11 +428,32 @@ static int mapped_heads(const DecRecArgs& a) {
     return a.nk * (a.h_v / a.h_k);
 }
 
+// Thread-block clusters are Hopper/Blackwell. Ampere runs the same recurrence as two kernels (raw output, then the norm).
+static bool rec_cluster_device() {
+    int dev = 0, major = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return true;
+    if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) return true;
+    cudaGetLastError();
+    return major >= 9;
+}
+
+void dec_gdn_rec_split(const DecRecArgs& a, int n_tok, void* stream);
+void dec_gdn_rec_norm(const DecRecArgs& a, int n_tok, void* stream);
+
 void dec_gdn_rec(const DecRecArgs& a, int n_tok, void* stream) {
     if (n_tok < 1 || n_tok > kDecMaxT || a.n_embd != 32 * 8 * NJ || a.h_k <= 0 || a.h_v % a.h_k != 0 ||
         mapped_heads(a) < 1) {
         basalt::log::error("basalt", "dec_gdn_rec: invalid arguments");
         std::exit(1);
+    }
+    if (!rec_cluster_device()) {
+        if (a.o == nullptr) {
+            basalt::log::error("basalt", "dec_gdn_rec: this GPU has no thread-block clusters and the call has no raw-output buffer");
+            std::exit(1);
+        }
+        dec_gdn_rec_split(a, n_tok, stream);
+        dec_gdn_rec_norm(a, n_tok, stream);
+        return;
     }
     const dim3 grid((unsigned) (mapped_heads(a) * 4)), block(S);
     const cudaStream_t s = (cudaStream_t) stream;
@@ -417,6 +468,10 @@ void dec_gdn_rec_seg(const DecRecArgs& a, const SegRow* rows, size_t state_off, 
     if (n_rows < 1 || max_n < 1 || max_n > kDecMaxT || !rows || a.n_embd != 32 * 8 * NJ || a.h_k <= 0 ||
         a.h_v % a.h_k != 0 || a.nk != 0) {
         basalt::log::error("basalt", "dec_gdn_rec_seg: invalid arguments");
+        std::exit(1);
+    }
+    if (!rec_cluster_device()) {
+        basalt::log::error("basalt", "dec_gdn_rec_seg: this GPU has no thread-block clusters");
         std::exit(1);
     }
     const dim3 grid((unsigned) (a.h_v * 4), (unsigned) n_rows), block(S);

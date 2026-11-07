@@ -203,8 +203,12 @@ __global__ void __launch_bounds__(kAmThreads) sampler_greedy_cluster_kernel(cons
     __shared__ float cv[kAmCtas];    // on CTA 0: each CTA's result
     __shared__ int ci[kAmCtas];
     unsigned rank;
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(rank));
+    #endif
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" ::: "memory");
+    #endif
     const float* l = logits + (size_t) blockIdx.y * n_vocab;
     float bv = __int_as_float(0xff800000);   // -inf; `n_vocab` is "no candidate", as in sampler_greedy_kernel
     int best = n_vocab;
@@ -229,17 +233,28 @@ __global__ void __launch_bounds__(kAmThreads) sampler_greedy_cluster_kernel(cons
         for (int off = 16; off > 0; off >>= 1)
             am_merge(__shfl_down_sync(0xFFFFFFFFu, bv, off), __shfl_down_sync(0xFFFFFFFFu, best, off), bv, best);
     }
-    asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory");   // CTA 0 runs
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
+    asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory");
+    #endif
+   // CTA 0 runs
     if (threadIdx.x == 0) {
         uint64_t a;
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("mapa.u64 %0, %1, %2;\n" : "=l"(a) : "l"((uint64_t) &cv[rank]), "r"(0u));
+        #endif
         *reinterpret_cast<float*>(a) = bv;
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("mapa.u64 %0, %1, %2;\n" : "=l"(a) : "l"((uint64_t) &ci[rank]), "r"(0u));
+        #endif
         *reinterpret_cast<int*>(a) = best;
     }
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory");
+    #endif
     if (rank != 0) return;
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory");
+    #endif
     if (warp == 0) {
         bv = lane < kAmCtas ? cv[lane] : __int_as_float(0xff800000);
         best = lane < kAmCtas ? ci[lane] : n_vocab;
@@ -269,8 +284,12 @@ __global__ void __launch_bounds__(kAmThreads) sampler_greedy_top_prob_cluster_ke
     __shared__ float part[32];
     __shared__ int pick;
     unsigned rank;
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(rank));
+    #endif
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" ::: "memory");
+    #endif
     const float* l = logits + (size_t) blockIdx.y * n_vocab;
     float bv = __int_as_float(0xff800000);
     int best = n_vocab;
@@ -295,17 +314,27 @@ __global__ void __launch_bounds__(kAmThreads) sampler_greedy_top_prob_cluster_ke
         for (int off = 16; off > 0; off >>= 1)
             am_merge(__shfl_down_sync(0xFFFFFFFFu, bv, off), __shfl_down_sync(0xFFFFFFFFu, best, off), bv, best);
     }
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory");
+    #endif
     if (threadIdx.x == 0) {
         uint64_t a;
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("mapa.u64 %0, %1, %2;\n" : "=l"(a) : "l"((uint64_t) &cv[rank]), "r"(0u));
+        #endif
         *reinterpret_cast<float*>(a) = bv;
+        #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         asm volatile("mapa.u64 %0, %1, %2;\n" : "=l"(a) : "l"((uint64_t) &ci[rank]), "r"(0u));
+        #endif
         *reinterpret_cast<int*>(a) = best;
     }
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("barrier.cluster.arrive.release.aligned;\n" ::: "memory");
+    #endif
     if (rank != 0) return;
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("barrier.cluster.wait.acquire.aligned;\n" ::: "memory");
+    #endif
     if (warp == 0) {
         bv = lane < kAmCtas ? cv[lane] : __int_as_float(0xff800000);
         best = lane < kAmCtas ? ci[lane] : n_vocab;

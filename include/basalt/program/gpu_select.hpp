@@ -35,7 +35,7 @@ struct GpuSpec {
 /// Parses "", "auto" or "A,B,..."; false with `err` naming what is wrong.
 bool parse_gpu_spec(const std::string& text, GpuSpec& out, std::string& err);
 
-/// Whether Basalt runs on the card: compute capability 12.0, or unknown (nothing to check against).
+/// Whether the card can take part: compute capability 12.0 (main or peer), 8.6 (peer only), or unknown.
 bool gpu_supported(const GpuCard& c);
 
 /// "GPU 1 (RTX 5060 Ti)": the visible number the user types, and the name when known.

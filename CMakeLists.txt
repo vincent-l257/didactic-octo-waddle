@@ -1,7 +1,7 @@
 # basalt: a local inference engine for one NVIDIA GPU.
 cmake_minimum_required(VERSION 3.24)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 120 CACHE STRING "CUDA architectures" FORCE)
+  set(CMAKE_CUDA_ARCHITECTURES "86;120" CACHE STRING "CUDA architectures" FORCE)
 endif()
 project(basalt VERSION 0.2.1 LANGUAGES C CXX CUDA)
 add_compile_definitions(BASALT_VERSION="${PROJECT_VERSION}")
@@ -37,11 +37,11 @@ endfunction()
 # the CUDA language gives the .cu compile rules but not the imported targets, so `CUDA::cudart` is brought in
 # explicitly for the host-side programs that call the runtime themselves
 find_package(CUDAToolkit REQUIRED)
-# One architecture only: the kernels use its instructions and nothing else is tested.
+# 120 is the main card. 86 is the Ampere peer image (the expert kernels the 3090 launches).
 foreach(_a IN LISTS CMAKE_CUDA_ARCHITECTURES)
   string(REGEX REPLACE "[-a].*$" "" _base "${_a}")     # 120-real / 120a are still 120
-  if(NOT _base STREQUAL "120")
-    message(FATAL_ERROR "CMAKE_CUDA_ARCHITECTURES is '${CMAKE_CUDA_ARCHITECTURES}': basalt builds for compute capability 12.0 only")
+  if(NOT _base STREQUAL "120" AND NOT _base STREQUAL "86")
+    message(FATAL_ERROR "CMAKE_CUDA_ARCHITECTURES is '${CMAKE_CUDA_ARCHITECTURES}': basalt builds for compute capability 12.0 and 8.6")
   endif()
 endforeach()
 if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.0)

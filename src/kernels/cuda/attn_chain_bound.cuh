@@ -15,7 +15,9 @@ __device__ __forceinline__ bool mkb_give_up(unsigned long long t0, int kind, int
 }
 __device__ __forceinline__ bool mkb_try(unsigned bar, unsigned ph) {
     unsigned d;
+    #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
     asm volatile("{ .reg .pred p; mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }" : "=r"(d) : "r"(bar), "r"(ph) : "memory");
+    #endif
     return d != 0;
 }
 __device__ __forceinline__ void mkb_mwait(unsigned bar, unsigned ph, int line) {

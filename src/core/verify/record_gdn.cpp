@@ -44,6 +44,7 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
         ra.gamma = (const float*) wnm->data; ra.h = hb; ra.gate = gate; ra.beta = beta; ra.yq = v_.xq_;
         ra.C = (int) C; ra.n_embd = (int) N; ra.h_k = (int) HK; ra.h_v = (int) HV; ra.eps = EPS;
         ra.k0 = 0; ra.nk = v_.gs_nk0_; ra.qkv_out = qkv;
+        ra.o = v_.y_;   // Ampere has no thread-block clusters; the split recurrence writes here
         dec_gdn_rec(ra, n, cs);
         dense_proj(4, GL.to, GL.wo0, v_.xq_, v_.bo_, Z0, (int) N, n, cs);
         goto gdn_done;
@@ -86,6 +87,7 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
         ra.dt = (const float*) wdt->data; ra.ssm_a = (const float*) wsa->data; ra.z = v_.z_;
         ra.gamma = (const float*) wnm->data; ra.h = hb; ra.gate = gate; ra.beta = beta; ra.yq = v_.xq_;
         ra.C = (int) C; ra.n_embd = (int) N; ra.h_k = (int) HK; ra.h_v = (int) HV; ra.eps = EPS;
+        ra.o = v_.y_;   // Ampere has no thread-block clusters; the split recurrence writes here
         ra.early_trigger = pdl;   // PDL2: the out projection stages its weights
         {
             PdlScope pr(pdl);
@@ -112,6 +114,7 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
         ra.dt = (const float*) wdt->data; ra.ssm_a = (const float*) wsa->data; ra.z = v_.z_;
         ra.gamma = (const float*) wnm->data; ra.h = hb; ra.gate = gate; ra.beta = beta; ra.yq = v_.xq_;
         ra.C = (int) C; ra.n_embd = (int) N; ra.h_k = (int) HK; ra.h_v = (int) HV; ra.eps = EPS;
+        ra.o = v_.y_;   // Ampere has no thread-block clusters; the split recurrence writes here
         cudaStreamWaitEvent(cs, v_.ev_join_, 0);
         for (int i = 3; i <= 5; ++i) stamp(l, i);
         {
@@ -132,6 +135,7 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
         ra.dt = (const float*) wdt->data; ra.ssm_a = (const float*) wsa->data; ra.z = v_.z_;
         ra.gamma = (const float*) wnm->data; ra.h = hb; ra.gate = gate; ra.beta = beta; ra.yq = v_.xq_;
         ra.C = (int) C; ra.n_embd = (int) N; ra.h_k = (int) HK; ra.h_v = (int) HV; ra.eps = EPS;
+        ra.o = v_.y_;   // Ampere has no thread-block clusters; the split recurrence writes here
         ra.early_trigger = pdl;   // PDL2: the out projection stages its weights
         if (gdnf_fork) {
             if (gdnf == 2) gdnf_z_side();
