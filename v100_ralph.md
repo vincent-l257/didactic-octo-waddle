@@ -12,7 +12,7 @@ three-card IQ3_S setup. Each iteration: profile, fix the largest V100 cost, rebu
   `prompt stages: ...` (busy per card, hand-off, report).
 - Greedy identity: compare the reply with the previous run's json in the scratchpad.
 
-## Results (IQ3_S, 18k prompt, one run each)
+## Results (IQ3_S, 18k prompt, 32k context, one run each)
 | change | prompt tok/s | decode tok/s | V100 busy |
 |---|---|---|---|
 | two cards only | 1301 | 68.0 | - |
@@ -35,7 +35,17 @@ resident=7.0GB with 4096 chunks vs 11.2GB with 8192, so expert placement differs
 Split sweep: 9-10 / 28-29 are flat (~1380); wall 12.5 s vs V100 9.4 s busy, so ~3 s is pipeline fill/drain.
 Best now: `--layer-split 10,28` (serve3_iq3_1028.bat): beats two cards (1301 / 68.0) on both prompt and decode.
 
-## IQ4_XS on three cards (same build, 18k prompt, one run each)
+## At 262k context (the real setting; one run each)
+Every table below this one ran with `--max-context 32768` (a launcher override from the first three-card test,
+copied into every later launcher). basalt_config.json sets 262144; launchers now carry no override.
+| model, split | 18k prompt: prompt / decode tok/s | 125k prompt: prompt / decode tok/s |
+|---|---|---|
+| IQ3_S 10,28 | 1297 / 97.3 | 1802 / 89.4 |
+| IQ4_XS 10,30 | 1078 / 67.0 | 1580 / 65.0 |
+Both keep the V100's own prompt buffers (no loan) at 262k. IQ3_S: 100% of experts in VRAM; IQ4_XS: 92%.
+Long prompt: `<scratchpad>/huge.json` (docs + src, 125,278 tokens); `PROMPT=huge measure.sh <tag> <log>`.
+
+## IQ4_XS on three cards (same build, 18k prompt, 32k context, one run each)
 | setup | prompt tok/s | decode tok/s | V100 busy |
 |---|---|---|---|
 | two cards (earlier) | 992 | 55.0 | - |
