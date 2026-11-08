@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include "basalt/log.hpp"
 #include "basalt/kernels/cc_launch.hpp"
+#include "basalt/prefill/gdn70.hpp"
 
 namespace basalt::prefill {
 namespace {
@@ -446,11 +447,18 @@ void check(const char* what) {
 
 uint64_t gdn_work_bytes(int64_t T) {
     const int64_t chunks = (T + CK - 1) / CK;
-    return (uint64_t) chunks * (HK * sizeof(QkChunk) + HV * sizeof(Control));
+    const uint64_t own = (uint64_t) chunks * (HK * sizeof(QkChunk) + HV * sizeof(Control));
+    const uint64_t v70 = gdn70::work_bytes(T);   // a cc 7.0 card's recurrence (gdn70.cu)
+    return own > v70 ? own : v70;
 }
 
 void gdn_recurrence(float* state, const float* h, const float* gate, const float* beta, const float* z,
                     const float* gamma, float eps, void* work, float* y, uint16_t* y16, int64_t T, void* stream) {
+    if (T > 0 && basalt::kernels::sm70_current()) {   // no bf16/tf32 mma: the FP32 recurrence
+        gdn70::recurrence(state, h, gate, beta, z, gamma, eps, work, y, y16, T, stream);
+        check("gdn_recurrence");
+        return;
+    }
     if (T > 0) {
         const cudaStream_t s = (cudaStream_t) stream;
         const int chunks = (int) ((T + CK - 1) / CK);
