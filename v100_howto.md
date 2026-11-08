@@ -60,6 +60,17 @@ The method behind `v100_ralph.md` (results and queue live there). `<sp>` is the 
   - `decode timing:` gives windows, avg T, tokens per window and verify ms.
 - Nsight Systems hangs this engine on this box (through serve and through `--serve` stdin alike). Don't use it.
 
+## Changing a V100 kernel without reloading the weights
+- Start the server with `BASALT_SM70_HOT=1` (`<sp>/serve3_iq3_1028_hot.bat`).
+- After editing a .cu file, rebuild only its cubin while the server runs. The exe is locked, but the cubins aren't:
+  `cmd //c "<vcvars + CUDA_PATH as in build-v100.bat> && cmake --build build-v100 --target sm70_cubins"`.
+- The next request reloads every changed cubin (engine.log `basalt sm70: CUDA2: reloaded N cubins, M kernels`).
+  Prompt-path launches use the new code at once.
+- Decode's captured CUDA graphs keep the old code (the old modules stay loaded), so decode changes still need a
+  restart. So do host-side (.cpp) changes.
+- A repeated prompt hits the conversation cache. Change the prompt, or check `cached_tokens` in the reply, when
+  re-measuring prompt speed.
+
 ## Timing kernels on their own
 Per-kernel truth comes from standalone programs in `<sp>/gt/`, built with CUDA 12.8 for sm_70/86/120. They run with
 `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0` (V100) or `=2` (3090).

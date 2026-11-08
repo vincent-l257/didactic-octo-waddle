@@ -96,7 +96,14 @@ hc8 read at T=3, us (V100 / 3090): norm 4.9/3.6, down 34.7/17.1, up 19.1/15.7.
   8k on the V100) would need the V100 stage to split each incoming chunk; parked: on the 199k prompt the V100 is
   91.8 s busy of 94.6 s (its own compute, ~0.46 ms/token), a ~2.2k tok/s ceiling that bigger chunks elsewhere don't lift.
 - Repacked expert layouts (+20% standalone) are parked: the V100's expert cache is also what decode reads (ggml layout).
-- Next: the V100 WMMA GEMM (all dense prompt projections, ~1.7 s of the profile), tuned standalone in `<scratchpad>/gt/gemm70/`.
+- **Done:** V100 dense GEMM rewritten (src/prefill/gemm_sm70.cuh replaces gemm_wmma.cuh; from `<scratchpad>/gt/gemm70/`):
+  mma.m8n8k4, two smem stages + register prefetch, one barrier per step, padded/interleaved smem, grouped tile
+  order, float4 epilogue; tiles by N (256x128, 128x64, 64x48, CUDA cores for N <= 8). Standalone at 8192 rows:
+  gdn.qkv 11.4 -> 5.9 ms, qsa.q 14.1 -> 7.2, gdn.out 4.6 -> 3.3, hc.down 1.8 -> 1.1, hc.up 1.6 -> 1.2; bitwise the
+  old kernel on every tensor-core shape; inject (N=4) now exact in FP32 (numerics change). End to end: 18k prompt
+  1672 -> 1733 tok/s, decode 105.7, V100 busy 7.22 -> 6.76 s; 199k prompt 2085 -> 2213 tok/s, decode 94.4.
+- **Done:** sm_70 cubin hot reload (BASALT_SM70_HOT=1): the engine reloads changed cubins between requests, so a
+  V100 kernel change needs `--target sm70_cubins` and the next request, not a restart (see v100_howto.md).
 - Two cards (5070 Ti + 3090, 262k): 1301 / 68.0 on Windows (bin\basalt.exe, earlier). Same build as three cards
   (serve2_iq3_v100build.bat, auto split 0-22 / 23-47, 44% of experts in RAM), long400: 1271 / 70.9. Three cards:
   1581 / ~100. Three cards only run on Windows (driver); the user's headless Linux two-card is faster than Windows
