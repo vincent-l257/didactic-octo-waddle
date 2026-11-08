@@ -79,6 +79,13 @@ hc8 read at T=3, us (V100 / 3090): norm 4.9/3.6, down 34.7/17.1, up 19.1/15.7.
   12.3 ms, 40-44 TFLOPS; ~1.3e-3 rel. error). 18 of the V100's 20 layers now take the f16 path (30 and 36 keep MMQ:
   Q2_0 down). IQ3_S 10,28, 262k, long400: prompt 1526 tok/s (from 1371 before the path), decode 99.2 (run-to-run
   spread today 99-104), V100 busy 8.22 s vs 3090 6.86 s: the V100 is still the slowest stage. Reply opens the same.
+- Split 10,29 with the f16 path: 1538 / 98.8, V100 8.07 s: no better than 10,28.
+- **Done:** in place (v70_inplace: every routed expert resident, gate|up contiguous): no group gather, a per-expert
+  pointer table, one gate|up and one down launch per layer. Prompt 1526 -> 1581 tok/s, V100 busy 8.22 -> 7.78 s,
+  reply bitwise the same as the per-group launches (md5). Profile before it (per group): x.gu 1337, x.down 866,
+  x.gather 1113 ms (60 layers, sync-inflated).
+- Two cards (5070 Ti + 3090, 262k): 1301 / 68.0 on Windows. The user reports two cards do better on Linux (numbers
+  wanted).
 Specs (V100 PCIe / 3090): FP32 14 / 36 TFLOPS; FP16 tensor fp32-acc ~112 / ~71; INT8 dp4a ~56 / int8 TC ~284;
 bandwidth 900 / 936 GB/s. The V100 wins only on fp16 tensor cores.
 Ranked queue (agent estimates, unmeasured unless noted):
