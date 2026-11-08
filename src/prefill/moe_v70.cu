@@ -1,8 +1,8 @@
 // src/prefill/moe_v70.cu - prompt expert products on compute capability 7.0: the weights' k-step tiles dequantized to
 // f16 in shared memory (block scale folded in), f16 activations, mma.m8n8k4 with f32 accumulation.  One launch covers
 // a list of jobs (an expert and up to 64 consecutive sorted rows); a row's input and output share its index.
-// gate|up writes silu(gate) * up as f16 H; down writes f32 rows.  Weights are read in ggml's layout (IQ3_S gate|up,
-// IQ4_NL down).
+// gate|up writes silu(gate) * up as f16 H; down writes f32 rows.  Weights are read in ggml's layout (IQ3_XXS, IQ3_S, IQ2_S
+// or IQ4_XS gate|up, IQ4_NL down).
 #include "basalt/prefill/moe_v70.hpp"
 
 #include <cuda_fp16.h>
@@ -41,25 +41,33 @@ __device__ __forceinline__ void store16(__half* dst, const uint32_t* v) {
 // 32 kq_part() of the step): fetch() reads its raw bytes into registers, put() writes 32 f16 values (block scale folded
 // in) to shared memory. ew is the expert's base, wrow the weight row (< 0: past the matrix, zeros), M x K the matrix.
 
-// 8 grid lookups + signs + scale -> 32 f16 values (ggml dequantize_row_iq3_s, the scale d (1 + 2 s) rounded to f16)
-__device__ __forceinline__ void iq3s_put(uint32_t q0, uint32_t q1, uint32_t sg, uint32_t h, __half2 db, __half* dst,
-                                         const uint32_t* grid) {
-    uint32_t v[16];
+// 4 grid bytes (each < 256) and 4 sign bits (low nibble of t) -> 2 half2 words of +-db * byte
+__device__ __forceinline__ void g4_put(uint32_t g, uint32_t t, __half2 db, uint32_t& o0, uint32_t& o1) {
     const __half2 k1024 = h2bits(0x64006400u);
+    // sign bits to bit 7 of bytes 0..3, then to the half sign bits
+    const uint32_t z = ((t & 0xF) * 0x10204080u) & 0x80808080u;
+    const uint32_t x0 = __byte_perm(g, 0x64646464u, 0x4140), x1 = __byte_perm(g, 0x64646464u, 0x4342);
+    const uint32_t a0 = bits(__hsub2(h2bits(x0), k1024)) ^ __byte_perm(z, 0, 0x1404);
+    const uint32_t a1 = bits(__hsub2(h2bits(x1), k1024)) ^ __byte_perm(z, 0, 0x3424);
+    o0 = bits(__hmul2(h2bits(a0), db));
+    o1 = bits(__hmul2(h2bits(a1), db));
+}
+// 8 lookups of 4-byte grid entries: index byte j of q0|q1 plus bit j of h as bit 8, signs bits 4j..4j+3 of sg
+__device__ __forceinline__ void grid8_put(uint32_t q0, uint32_t q1, uint32_t sg, uint32_t h, __half2 db, __half* dst,
+                                          const uint32_t* grid) {
+    uint32_t v[16];
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
         const uint32_t q = j < 4 ? q0 : q1;
         const uint32_t idx = ((q >> (8 * (j & 3))) & 0xFF) | (((h >> j) & 1) << 8);
-        const uint32_t g = grid[idx];
-        // sign bits 4j..4j+3 to bit 7 of bytes 0..3, then to the half sign bits
-        const uint32_t z = (((sg >> (4 * j)) & 0xF) * 0x10204080u) & 0x80808080u;
-        const uint32_t x0 = __byte_perm(g, 0x64646464u, 0x4140), x1 = __byte_perm(g, 0x64646464u, 0x4342);
-        const uint32_t a0 = bits(__hsub2(h2bits(x0), k1024)) ^ __byte_perm(z, 0, 0x1404);
-        const uint32_t a1 = bits(__hsub2(h2bits(x1), k1024)) ^ __byte_perm(z, 0, 0x3424);
-        v[2 * j] = bits(__hmul2(h2bits(a0), db));
-        v[2 * j + 1] = bits(__hmul2(h2bits(a1), db));
+        g4_put(grid[idx], sg >> (4 * j), db, v[2 * j], v[2 * j + 1]);
     }
     store16(dst + kq_row() * LD + kq_part() * 32, v);
+}
+// ggml dequantize_row_iq3_s, the scale d (1 + 2 s) rounded to f16
+__device__ __forceinline__ void iq3s_put(uint32_t q0, uint32_t q1, uint32_t sg, uint32_t h, __half2 db, __half* dst,
+                                         const uint32_t* grid) {
+    grid8_put(q0, q1, sg, h, db, dst, grid);
 }
 __device__ __forceinline__ void zero_put(__half* dst) {
     uint32_t v[16] = {};
@@ -69,7 +77,10 @@ __device__ __forceinline__ void zero_put(__half* dst) {
 // IQ3_S as stored by ggml: 110-byte blocks of 256 (2-byte aligned), read with 9 u16 loads per sub-block
 struct TileIQ3S {
     static constexpr int QK = 256;
-    static constexpr bool GRID = true;
+    static constexpr int GRID_WORDS = 512;
+    __device__ static void load_grid(uint32_t* g) {
+        for (int i = threadIdx.x; i < 512; i += NTH) g[i] = iq3s_grid[i];
+    }
     uint16_t d, qh, sc;
     uint32_t q0, q1, sg;
     int ib;
@@ -98,7 +109,10 @@ struct TileIQ3S {
 // bytes 0-7 qs, 8-11 signs, 12 qh, 13 zero, 14-15 f16 d (1 + 2 s)
 struct TileIQ3SR {
     static constexpr int QK = 256;
-    static constexpr bool GRID = true;
+    static constexpr int GRID_WORDS = 512;
+    __device__ static void load_grid(uint32_t* g) {
+        for (int i = threadIdx.x; i < 512; i += NTH) g[i] = iq3s_grid[i];
+    }
     uint4 r;
     bool live;
     __device__ __forceinline__ void fetch(const uint8_t* ew, int wrow, int, int K, int k0) {
@@ -127,9 +141,8 @@ __device__ __forceinline__ uint32_t iq4nl_lut(uint32_t v) {
     return (hi & m) | (lo & ~m);
 }
 // 16 quant bytes + f16 d -> 32 f16 values (low nibbles elements 0-15, high 16-31)
-__device__ __forceinline__ void iq4nl_put(const uint32_t (&q)[4], uint16_t d, __half* dst) {
+__device__ __forceinline__ void iq4nl_put(const uint32_t (&q)[4], __half2 dd, __half* dst) {
     uint32_t v[16];
-    const __half2 dd = __half2half2(__ushort_as_half(d));
     const __half2 k1152 = h2bits(0x64806480u);
 #pragma unroll
     for (int w = 0; w < 4; ++w) {
@@ -145,7 +158,8 @@ __device__ __forceinline__ void iq4nl_put(const uint32_t (&q)[4], uint16_t d, __
 // IQ4_NL as stored by ggml: 18-byte blocks of 32 (2-byte aligned), read with 9 u16 loads
 struct TileIQ4NL {
     static constexpr int QK = 32;
-    static constexpr bool GRID = false;
+    static constexpr int GRID_WORDS = 0;
+    __device__ static void load_grid(uint32_t*) {}
     uint16_t d;
     uint32_t q[4];
     bool live;
@@ -159,7 +173,7 @@ struct TileIQ4NL {
     }
     __device__ __forceinline__ void put(__half* dst, const uint32_t*) const {
         if (!live) return zero_put(dst);
-        iq4nl_put(q, d, dst);
+        iq4nl_put(q, __half2half2(__ushort_as_half(d)), dst);
     }
 };
 
@@ -167,7 +181,8 @@ struct TileIQ4NL {
 // the f16 d of every block in the same order
 struct TileIQ4NLR {
     static constexpr int QK = 32;
-    static constexpr bool GRID = false;
+    static constexpr int GRID_WORDS = 0;
+    __device__ static void load_grid(uint32_t*) {}
     uint16_t d;
     uint32_t q[4];
     bool live;
@@ -181,10 +196,168 @@ struct TileIQ4NLR {
     }
     __device__ __forceinline__ void put(__half* dst, const uint32_t*) const {
         if (!live) return zero_put(dst);
-        iq4nl_put(q, d, dst);
+        iq4nl_put(q, __half2half2(__ushort_as_half(d)), dst);
     }
 };
 
+// a u32 at a 2-byte aligned address; the alignment is the same for every thread of a step (row and expert strides are
+// multiples of 4), so the branch does not diverge
+__device__ __forceinline__ uint32_t ld32_a2(const uint8_t* p) {
+    if (reinterpret_cast<size_t>(p) & 2) {
+        const uint16_t* h = reinterpret_cast<const uint16_t*>(p);
+        return (uint32_t) h[0] | ((uint32_t) h[1] << 16);
+    }
+    return *reinterpret_cast<const uint32_t*>(p);
+}
+
+// IQ3_XXS as stored by ggml: 98-byte blocks of 256 (2-byte aligned): d, qs[64] grid indices, then per 32-weight
+// sub-block a u32 of 4 x 7-bit sign patterns (ksigns_iq2xs: the 7 bits plus their parity as bit 7) and a 4-bit scale
+// in bits 28-31; db = d (0.5 + s) 0.5 rounded to f16
+struct TileIQ3XXS {
+    static constexpr int QK = 256;
+    static constexpr int GRID_WORDS = 256;
+    __device__ static void load_grid(uint32_t* g) {
+        for (int i = threadIdx.x; i < 256; i += NTH) g[i] = iq3xxs_grid[i];
+    }
+    uint16_t d;
+    uint32_t q0, q1, aux;
+    bool live;
+    __device__ __forceinline__ void fetch(const uint8_t* ew, int wrow, int, int K, int k0) {
+        live = wrow >= 0;
+        if (!live) return;
+        const int ib = (k0 & 255) / 32 + kq_part();
+        const uint8_t* p = ew + ((size_t) wrow * (K / 256) + (k0 >> 8)) * 98;
+        d = *reinterpret_cast<const uint16_t*>(p);
+        q0 = ld32_a2(p + 2 + 8 * ib);
+        q1 = ld32_a2(p + 6 + 8 * ib);
+        aux = ld32_a2(p + 66 + 4 * ib);
+    }
+    __device__ __forceinline__ void put(__half* dst, const uint32_t* grid) const {
+        if (!live) return zero_put(dst);
+        const __half2 db = __float2half2_rn(__half2float(__ushort_as_half(d)) * (0.5f + (float) (aux >> 28)) * 0.5f);
+        uint32_t sg = 0;
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const uint32_t s7 = (aux >> (7 * l)) & 127;
+            sg |= (s7 | ((__popc(s7) & 1) << 7)) << (8 * l);
+        }
+        grid8_put(q0, q1, sg, 0, db, dst, grid);
+    }
+};
+
+// IQ2_S as stored by ggml: 82-byte blocks of 256 (2-byte aligned): d, qs[32] grid index low bytes, signs[32], qh[8]
+// (2 high index bits per group of 8), scales[8] (two 4-bit scales per 32-weight sub-block, one per 16 weights);
+// db = d (0.5 + s) 0.25 rounded to f16. The grid's bytes are 8, 25 or 43: shared memory holds each 8-byte entry as 8
+// nibbles (0, 1, 2), which a prmt over those three bytes turns back into the entry
+struct TileIQ2S {
+    static constexpr int QK = 256;
+    static constexpr int GRID_WORDS = 1024;
+    static constexpr uint32_t VALS = 0x002B1908u;
+    __device__ static void load_grid(uint32_t* g) {
+        for (int i = threadIdx.x; i < 1024; i += NTH) {
+            uint32_t c = 0;
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const uint32_t v = (uint32_t) (iq2s_grid[i] >> (8 * j)) & 0xFF;
+                c |= (v == 8 ? 0u : v == 25 ? 1u : 2u) << (4 * j);
+            }
+            g[i] = c;
+        }
+    }
+    uint16_t d, qh, sc;
+    uint32_t qs, sg;
+    int ib;
+    bool live;
+    __device__ __forceinline__ void fetch(const uint8_t* ew, int wrow, int, int K, int k0) {
+        live = wrow >= 0;
+        if (!live) return;
+        ib = (k0 & 255) / 32 + kq_part();
+        const uint8_t* p = ew + ((size_t) wrow * (K / 256) + (k0 >> 8)) * 82;
+        const uint16_t* p16 = reinterpret_cast<const uint16_t*>(p);
+        d = p16[0];
+        qs = ld32_a2(p + 2 + 4 * ib);
+        sg = ld32_a2(p + 34 + 4 * ib);
+        qh = p16[33 + (ib >> 1)];
+        sc = p16[37 + (ib >> 1)];
+    }
+    __device__ __forceinline__ void put(__half* dst, const uint32_t* grid) const {
+        if (!live) return zero_put(dst);
+        const float df = __half2float(__ushort_as_half(d));
+        const uint32_t s = (sc >> (8 * (ib & 1))) & 0xFF, h = (qh >> (8 * (ib & 1))) & 0xFF;
+        const __half2 db0 = __float2half2_rn(df * (0.5f + (float) (s & 15)) * 0.25f);
+        const __half2 db1 = __float2half2_rn(df * (0.5f + (float) (s >> 4)) * 0.25f);
+        uint32_t v[16];
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const uint32_t idx = ((qs >> (8 * l)) & 0xFF) | (((h >> (2 * l)) & 3) << 8);
+            const uint32_t c = grid[idx];
+            const uint32_t t = sg >> (8 * l);
+            const __half2 db = l < 2 ? db0 : db1;
+            g4_put(__byte_perm(VALS, 0, c & 0xFFFF), t, db, v[4 * l], v[4 * l + 1]);
+            g4_put(__byte_perm(VALS, 0, c >> 16), t >> 4, db, v[4 * l + 2], v[4 * l + 3]);
+        }
+        store16(dst + kq_row() * LD + kq_part() * 32, v);
+    }
+};
+
+// IQ4_XS as stored by ggml: 136-byte blocks of 256 (8-byte aligned): d, scales_h, scales_l[4], qs[128] (16 per
+// 32-weight sub-block, IQ4_NL nibble order); dl = d (ls - 32) rounded to f16
+struct TileIQ4XS {
+    static constexpr int QK = 256;
+    static constexpr int GRID_WORDS = 0;
+    __device__ static void load_grid(uint32_t*) {}
+    uint2 hd, qa, qb;
+    int ib;
+    bool live;
+    __device__ __forceinline__ void fetch(const uint8_t* ew, int wrow, int, int K, int k0) {
+        live = wrow >= 0;
+        if (!live) return;
+        ib = (k0 & 255) / 32 + kq_part();
+        const uint2* p = reinterpret_cast<const uint2*>(ew + ((size_t) wrow * (K / 256) + (k0 >> 8)) * 136);
+        hd = p[0];
+        qa = p[1 + 2 * ib];
+        qb = p[2 + 2 * ib];
+    }
+    __device__ __forceinline__ void put(__half* dst, const uint32_t*) const {
+        if (!live) return zero_put(dst);
+        const int ls = ((hd.y >> (8 * (ib >> 1) + 4 * (ib & 1))) & 0xF) | (((hd.x >> (16 + 2 * ib)) & 3) << 4);
+        const __half2 dl = __float2half2_rn(__half2float(__ushort_as_half((uint16_t) (hd.x & 0xFFFF))) * (float) (ls - 32));
+        const uint32_t q[4] = {qa.x, qa.y, qb.x, qb.y};
+        iq4nl_put(q, dl, dst);
+    }
+};
+
+// one thread per 32-weight sub-block: ggml IQ3_S rows (nrows x K) -> TileIQ3SR records
+// grid (ceil(nsub / 256), experts); src and dst advance by sstride / nsub records per expert
+__global__ void repack_iq3s(const uint8_t* __restrict__ src, size_t sstride, uint4* __restrict__ dst, size_t nsub) {
+    const size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x;
+    if (i >= nsub) return;
+    src += blockIdx.y * sstride;
+    dst += blockIdx.y * nsub;
+    const int ib = (int) (i % 8);
+    const uint16_t* p = reinterpret_cast<const uint16_t*>(src + (i / 8) * 110);
+    const uint32_t q0 = (uint32_t) p[1 + 4 * ib] | ((uint32_t) p[2 + 4 * ib] << 16);
+    const uint32_t q1 = (uint32_t) p[3 + 4 * ib] | ((uint32_t) p[4 + 4 * ib] << 16);
+    const uint32_t qh = (p[33 + (ib >> 1)] >> (8 * (ib & 1))) & 0xFF;
+    const uint32_t sg = (uint32_t) p[37 + 2 * ib] | ((uint32_t) p[38 + 2 * ib] << 16);
+    const int nib = (p[53 + (ib >> 2)] >> (8 * ((ib >> 1) & 1) + 4 * (ib & 1))) & 15;
+    const uint16_t db = __half_as_ushort(__float2half_rn(__half2float(__ushort_as_half(p[0])) * (float) (1 + 2 * nib)));
+    dst[i] = make_uint4(q0, q1, sg, qh | ((uint32_t) db << 16));
+}
+// one thread per block: ggml IQ4_NL (nblk blocks) -> TileIQ4NLR planes
+// grid (ceil(nblk / 256), experts); an expert of nblk blocks is 18 nblk bytes in both layouts
+__global__ void repack_iq4nl(const uint8_t* __restrict__ src, uint8_t* __restrict__ dst, size_t nblk) {
+    const size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x;
+    if (i >= nblk) return;
+    src += blockIdx.y * nblk * 18;
+    dst += blockIdx.y * nblk * 18;
+    const uint16_t* p = reinterpret_cast<const uint16_t*>(src + i * 18);
+    uint32_t q[4];
+#pragma unroll
+    for (int w = 0; w < 4; ++w) q[w] = (uint32_t) p[1 + 2 * w] | ((uint32_t) p[2 + 2 * w] << 16);
+    reinterpret_cast<uint4*>(dst)[i] = make_uint4(q[0], q[1], q[2], q[3]);
+    reinterpret_cast<uint16_t*>(dst + nblk * 16)[i] = p[0];
+}
 
 // the job's activation rows for one k-step (rows past n up to the token tiles are zeros)
 template <int JN>
@@ -250,9 +423,8 @@ __global__ void __launch_bounds__(NTH) k_moe(const Job* __restrict__ jobs, const
     const Job jb = jobs[blockIdx.y];
     extern __shared__ __align__(16) unsigned char smem_raw[];
     __half* const sbase = reinterpret_cast<__half*>(smem_raw);
-    __shared__ uint32_t grid[Tile::GRID ? 512 : 1];
-    if (Tile::GRID)
-        for (int i = threadIdx.x; i < 512; i += NTH) grid[i] = iq3s_grid[i];
+    __shared__ __align__(16) uint32_t grid[Tile::GRID_WORDS > 0 ? Tile::GRID_WORDS : 1];
+    Tile::load_grid(grid);
     const int n = jb.n, nt = (n + 15) / 16, warp = threadIdx.x >> 5;
     const int rg = warp % WR, tg = warp / WR;
     const bool split = nt <= TT;
@@ -405,7 +577,6 @@ __global__ void __launch_bounds__(NTH) k_moe(const Job* __restrict__ jobs, const
     }
 }
 
-
 // 2 x 2 warps of 64 weight rows x 32 tokens: 128 x 64 per block
 using C = Cfg<64, 32, false>;
 static_assert(C::JN == kJobRows, "a job holds a block's tokens");
@@ -421,7 +592,9 @@ void launch(const Job* jobs, int nj, const void* w, size_t es, int M, int K, con
 }  // namespace
 
 bool enabled() { return basalt::kernels::sm70_current(); }
-bool usable(int gu_type, int d_type) { return gu_type == 21 && d_type == 20; }   // IQ3_S gate|up, IQ4_NL down
+bool usable(int gu_type, int d_type) {   // IQ3_XXS, IQ3_S, IQ2_S or IQ4_XS gate|up; IQ4_NL down
+    return (gu_type == 18 || gu_type == 21 || gu_type == 22 || gu_type == 23) && d_type == 20;
+}
 
 Job* job_buffer(size_t n) {
     static std::mutex mu;
@@ -441,9 +614,16 @@ Job* job_buffer(size_t n) {
     return buf[dev];
 }
 
-void gu_swiglu(const Job* jobs, int nj, const void* w, size_t es, int M, int K, const uint16_t* x, uint16_t* h,
-               void* stream) {
-    launch<TileIQ3S, 1>(jobs, nj, w, es, M, K, x, nullptr, h, (cudaStream_t) stream);
+void gu_swiglu(int gu_type, const Job* jobs, int nj, const void* w, size_t es, int M, int K, const uint16_t* x,
+               uint16_t* h, void* stream) {
+    const cudaStream_t s = (cudaStream_t) stream;
+    switch (gu_type) {
+        case 18: launch<TileIQ3XXS, 1>(jobs, nj, w, es, M, K, x, nullptr, h, s); break;
+        case 21: launch<TileIQ3S, 1>(jobs, nj, w, es, M, K, x, nullptr, h, s); break;
+        case 22: launch<TileIQ2S, 1>(jobs, nj, w, es, M, K, x, nullptr, h, s); break;
+        case 23: launch<TileIQ4XS, 1>(jobs, nj, w, es, M, K, x, nullptr, h, s); break;
+        default: break;
+    }
 }
 void down(const Job* jobs, int nj, const void* w, size_t es, int M, int K, const uint16_t* h, float* out, void* stream) {
     launch<TileIQ4NL, 0>(jobs, nj, w, es, M, K, h, out, nullptr, (cudaStream_t) stream);

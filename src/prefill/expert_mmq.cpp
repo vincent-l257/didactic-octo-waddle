@@ -129,7 +129,7 @@ bool Prefill::Run::Chunk::Experts::Group::compute_mmq(size_t j, const uint8_t* b
     cudaMemsetAsync(m.grp_d + (size_t) ngx * mmq_db, 0, MMQ_TAIL, m.cs);
     if (v70_l) {   // the group's products on f16 tensor cores: H as f16 in H, down into Dm
         const int a = v70_goff[g], b = v70_goff[g + 1];
-        moe_v70::gu_swiglu(v70_dev + a, b - a, m.grp_gu, mmq_gub, 1280, N, (const uint16_t*) m.GU, (uint16_t*) m.H, m.cs);
+        moe_v70::gu_swiglu(mmq_gt, v70_dev + a, b - a, m.grp_gu, mmq_gub, 1280, N, (const uint16_t*) m.GU, (uint16_t*) m.H, m.cs);
         pf_tick((cudaStream_t) m.cs, "x.gu");
         moe_v70::down(v70_dev + a, b - a, m.grp_d, mmq_db, N, 640, (const uint16_t*) m.H, m.Dm, m.cs);
         pf_tick((cudaStream_t) m.cs, "x.down");
