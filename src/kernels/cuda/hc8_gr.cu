@@ -26,7 +26,7 @@ constexpr int MAX_HC = 4;
 constexpr int MAX_LR = 512;
 constexpr int G8 = 32;
 constexpr int DOWN_ROWS = 2;      // rows per down CTA
-constexpr int DOWN_THREADS = 160;
+constexpr int DOWN_THREADS = 256;
 constexpr int UP_THREADS = 256;
 
 struct Hc8Gr {
@@ -82,10 +82,10 @@ __device__ void hc8_norm(const Hc8Gr& p, int c, int t) {
 }
 __global__ void hc8_norm_kernel(Hc8Gr p) { hc8_norm(p, blockIdx.x, blockIdx.y); }
 
-// DOWN_ROWS rows of [q_down; q_inject] per CTA; a thread takes whole scale groups
+// DOWN_ROWS rows of [q_down; q_inject] per CTA
 __device__ void hc8_down(const Hc8Gr& p, int blk) {
     __shared__ float red[DOWN_THREADS / 32][DOWN_ROWS][MT];
-    const int D = p.n * p.hc, gpr = D / G8, nrows = p.lr + p.ninj;
+    const int D = p.n * p.hc, nrows = p.lr + p.ninj;
     const int8_t* q[DOWN_ROWS];
     const uint16_t* s[DOWN_ROWS];
 #pragma unroll
@@ -99,49 +99,33 @@ __device__ void hc8_down(const Hc8Gr& p, int blk) {
     for (int r = 0; r < DOWN_ROWS; ++r)
 #pragma unroll
         for (int t = 0; t < MT; ++t) acc[r][t] = 0.0f;
-    for (int g = threadIdx.x; g < gpr; g += blockDim.x) {
-        const int col0 = g * G8, c = col0 / p.n;
-        float wq[DOWN_ROWS][G8];
-        float sc[DOWN_ROWS];
-        {
-            float wn[G8];
-            const float4* w4 = reinterpret_cast<const float4*>(p.w_norm + col0);
+    // lanes take consecutive 4-column chunks, so every activation, norm-weight and weight load is coalesced
+    for (int col = 4 * (int) threadIdx.x; col < D; col += 4 * (int) blockDim.x) {
+        const int c = col / p.n, g = col / G8;
+        const float4 wn = *reinterpret_cast<const float4*>(p.w_norm + col);
+        float wq[DOWN_ROWS][4], sc[DOWN_ROWS];
 #pragma unroll
-            for (int j = 0; j < G8 / 4; ++j) {
-                const float4 v = w4[j];
-                wn[4 * j] = v.x; wn[4 * j + 1] = v.y; wn[4 * j + 2] = v.z; wn[4 * j + 3] = v.w;
-            }
-#pragma unroll
-            for (int r = 0; r < DOWN_ROWS; ++r) {
-                const uint4 a = reinterpret_cast<const uint4*>(q[r] + col0)[0];
-                const uint4 b = reinterpret_cast<const uint4*>(q[r] + col0)[1];
-                const uint32_t w[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
-#pragma unroll
-                for (int i = 0; i < G8; ++i) wq[r][i] = s8(w[i >> 2], i & 3) * wn[i];
-                sc[r] = f16f(s[r][g]);
-            }
+        for (int r = 0; r < DOWN_ROWS; ++r) {
+            const uint32_t w = *reinterpret_cast<const uint32_t*>(q[r] + col);
+            wq[r][0] = s8(w, 0) * wn.x;
+            wq[r][1] = s8(w, 1) * wn.y;
+            wq[r][2] = s8(w, 2) * wn.z;
+            wq[r][3] = s8(w, 3) * wn.w;
+            sc[r] = f16f(s[r][g]);
         }
 #pragma unroll
         for (int t = 0; t < MT; ++t) {
             if (t < p.T) {
-                const float4* x4 = reinterpret_cast<const float4*>(src_of(p, t) + col0);
-                float d[DOWN_ROWS];
-#pragma unroll
-                for (int r = 0; r < DOWN_ROWS; ++r) d[r] = 0.0f;
-#pragma unroll
-                for (int j = 0; j < G8 / 4; ++j) {
-                    const float4 v = x4[j];
-#pragma unroll
-                    for (int r = 0; r < DOWN_ROWS; ++r) {
-                        d[r] = fmaf(wq[r][4 * j], v.x, d[r]);
-                        d[r] = fmaf(wq[r][4 * j + 1], v.y, d[r]);
-                        d[r] = fmaf(wq[r][4 * j + 2], v.z, d[r]);
-                        d[r] = fmaf(wq[r][4 * j + 3], v.w, d[r]);
-                    }
-                }
+                const float4 v = *reinterpret_cast<const float4*>(src_of(p, t) + col);
                 const float rs = p.rs[t][c];
 #pragma unroll
-                for (int r = 0; r < DOWN_ROWS; ++r) acc[r][t] = fmaf(sc[r] * rs, d[r], acc[r][t]);
+                for (int r = 0; r < DOWN_ROWS; ++r) {
+                    float d = wq[r][0] * v.x;
+                    d = fmaf(wq[r][1], v.y, d);
+                    d = fmaf(wq[r][2], v.z, d);
+                    d = fmaf(wq[r][3], v.w, d);
+                    acc[r][t] = fmaf(sc[r] * rs, d, acc[r][t]);
+                }
             }
         }
     }
