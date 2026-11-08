@@ -414,9 +414,9 @@ struct Cfg {
 // MODE 0: out[r][col] = sum_k W_e[col][k] x[r][k], fp32, out row stride M.
 // MODE 1 (gate|up, M = 2 FF): block b covers gate rows BM/2 b .. + BM/2 and the matching up rows (FF + same); writes
 //   h[r][f] = silu(gate) * up as f16, row stride FF.
-// W_e = w + e * estride in Tile's layout, M x K (K a multiple of KC; of 256 for IQ3_S).
+// W_e = wp[e] in Tile's layout, M x K (K a multiple of KC; of 256 for IQ3_S).
 template <class Tile, int MODE, class C>
-__global__ void __launch_bounds__(NTH) k_moe(const Job* __restrict__ jobs, const uint8_t* __restrict__ w, size_t estride,
+__global__ void __launch_bounds__(NTH) k_moe(const Job* __restrict__ jobs, const uint8_t* const* __restrict__ wp,
                                              int M, int K, const __half* __restrict__ x,
                                              float* __restrict__ out, __half* __restrict__ hout) {
     constexpr int WR = 2, WT = 2, BM = C::BM, WM = C::WM, RT = C::RT, TT = C::TT, NP = C::NP, LO = 16 * TT, SLD = C::SLD;
@@ -442,7 +442,7 @@ __global__ void __launch_bounds__(NTH) k_moe(const Job* __restrict__ jobs, const
             for (int j = 0; j < 8; ++j) acc[a][b][j] = 0.f;
 
     // this thread's weight rows, one per pass of 64
-    const uint8_t* const ew = w + (size_t) jb.e * estride;
+    const uint8_t* const ew = wp[jb.e];
     int wr[NP];
 #pragma unroll
     for (int p = 0; p < NP; ++p) {
@@ -582,11 +582,11 @@ using C = Cfg<64, 32, false>;
 static_assert(C::JN == kJobRows, "a job holds a block's tokens");
 
 template <class Tile, int MODE>
-void launch(const Job* jobs, int nj, const void* w, size_t es, int M, int K, const uint16_t* x, float* out, uint16_t* h,
+void launch(const Job* jobs, int nj, const void* const* w, int M, int K, const uint16_t* x, float* out, uint16_t* h,
             cudaStream_t s) {
     if (nj <= 0) return;
     basalt::kernels::launch_cc(k_moe<Tile, MODE, C>, dim3((unsigned) ((M + C::BM - 1) / C::BM), (unsigned) nj), dim3(NTH),
-                               C::SMEM, s, jobs, (const uint8_t*) w, es, M, K, (const __half*) x, out, (__half*) h);
+                               C::SMEM, s, jobs, (const uint8_t* const*) w, M, K, (const __half*) x, out, (__half*) h);
 }
 
 }  // namespace
@@ -596,37 +596,43 @@ bool usable(int gu_type, int d_type) {   // IQ3_XXS, IQ3_S, IQ2_S or IQ4_XS gate
     return (gu_type == 18 || gu_type == 21 || gu_type == 22 || gu_type == 23) && d_type == 20;
 }
 
-Job* job_buffer(size_t n) {
+namespace {
+// a per-device device buffer of at least `bytes` (grows)
+void* grow(int which, size_t bytes) {
     static std::mutex mu;
-    static Job* buf[64] = {};
-    static size_t cap[64] = {};
+    static void* buf[2][64] = {};
+    static size_t cap[2][64] = {};
     int dev = 0;
     cudaGetDevice(&dev);
     if (dev < 0 || dev >= 64) return nullptr;
     std::lock_guard<std::mutex> lk(mu);
-    if (n > cap[dev]) {
-        if (buf[dev]) cudaFree(buf[dev]);
-        buf[dev] = nullptr;
-        cap[dev] = 0;
-        if (cudaMalloc((void**) &buf[dev], n * sizeof(Job)) != cudaSuccess) { cudaGetLastError(); return nullptr; }
-        cap[dev] = n;
+    if (bytes > cap[which][dev]) {
+        if (buf[which][dev]) cudaFree(buf[which][dev]);
+        buf[which][dev] = nullptr;
+        cap[which][dev] = 0;
+        if (cudaMalloc(&buf[which][dev], bytes) != cudaSuccess) { cudaGetLastError(); return nullptr; }
+        cap[which][dev] = bytes;
     }
-    return buf[dev];
+    return buf[which][dev];
 }
+}  // namespace
 
-void gu_swiglu(int gu_type, const Job* jobs, int nj, const void* w, size_t es, int M, int K, const uint16_t* x,
-               uint16_t* h, void* stream) {
+Job* job_buffer(size_t n) { return (Job*) grow(0, n * sizeof(Job)); }
+const void** ptr_buffer(size_t n) { return (const void**) grow(1, n * sizeof(void*)); }
+
+void gu_swiglu(int gu_type, const Job* jobs, int nj, const void* const* w, int M, int K, const uint16_t* x, uint16_t* h,
+               void* stream) {
     const cudaStream_t s = (cudaStream_t) stream;
     switch (gu_type) {
-        case 18: launch<TileIQ3XXS, 1>(jobs, nj, w, es, M, K, x, nullptr, h, s); break;
-        case 21: launch<TileIQ3S, 1>(jobs, nj, w, es, M, K, x, nullptr, h, s); break;
-        case 22: launch<TileIQ2S, 1>(jobs, nj, w, es, M, K, x, nullptr, h, s); break;
-        case 23: launch<TileIQ4XS, 1>(jobs, nj, w, es, M, K, x, nullptr, h, s); break;
+        case 18: launch<TileIQ3XXS, 1>(jobs, nj, w, M, K, x, nullptr, h, s); break;
+        case 21: launch<TileIQ3S, 1>(jobs, nj, w, M, K, x, nullptr, h, s); break;
+        case 22: launch<TileIQ2S, 1>(jobs, nj, w, M, K, x, nullptr, h, s); break;
+        case 23: launch<TileIQ4XS, 1>(jobs, nj, w, M, K, x, nullptr, h, s); break;
         default: break;
     }
 }
-void down(const Job* jobs, int nj, const void* w, size_t es, int M, int K, const uint16_t* h, float* out, void* stream) {
-    launch<TileIQ4NL, 0>(jobs, nj, w, es, M, K, h, out, nullptr, (cudaStream_t) stream);
+void down(const Job* jobs, int nj, const void* const* w, int M, int K, const uint16_t* h, float* out, void* stream) {
+    launch<TileIQ4NL, 0>(jobs, nj, w, M, K, h, out, nullptr, (cudaStream_t) stream);
 }
 
 }  // namespace basalt::prefill::moe_v70

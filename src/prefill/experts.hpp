@@ -223,6 +223,11 @@ struct Prefill::Run::Chunk::Experts::Group {
     std::vector<moe_v70::Job> v70_jobs;
     std::vector<int> v70_goff;
     moe_v70::Job* v70_dev = nullptr;
+    // in place: every routed expert of the layer is resident, so the blobs are read where they are (no group gather) and
+    // the layer's products are one launch each; v70_ptr holds gate|up then down pointers (n each, or the group slots)
+    bool v70_inplace = false;
+    std::vector<const void*> v70_ptr;
+    const void** v70_pdev = nullptr;
     Chunk::StagerDone stager_done{nullptr};
     // In the streamed walk an MMQ group is gathered in ONE launch, after ONE wait on its last
     // streamed copy (the copy stream is in order), and its ring slots are released by ONE event.  A

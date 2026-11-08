@@ -31,25 +31,39 @@ void Prefill::Run::Chunk::Experts::Group::prepare_products() {
                 m.bounds_host[n + 1 + g * (MMQ_GROUP + 1) + i] =
                     m.bounds_host[std::min(n, g * MMQ_GROUP + i)] - m.bounds_host[g * MMQ_GROUP];
         if (v70_l) {   // every group's jobs: its experts' rows in runs of at most kJobRows
+            const auto& f = lay.fmt[(size_t) l];
+            v70_inplace = m.cache != nullptr && n > 0 && f.up_off == mmq_gub / 2;
+            for (size_t j = 0; v70_inplace && j < n; ++j) v70_inplace = m.cache->slot_of(l, order[j]) >= 0;
             v70_jobs.clear();
             v70_goff.assign(ng + 1, 0);
             for (size_t g = 0; g < ng; ++g) {
                 for (size_t i = 0; i < MMQ_GROUP && g * MMQ_GROUP + i < n; ++i) {
-                    const int32_t e = order[g * MMQ_GROUP + i];
+                    const size_t j = g * MMQ_GROUP + i;
+                    const int32_t e = order[j];
                     const int r = (int) m.off[(size_t) e], c = (int) m.cnt[(size_t) e];
                     for (int k = 0; k < c; k += moe_v70::kJobRows)
-                        v70_jobs.push_back({(int) i, r + k, std::min(moe_v70::kJobRows, c - k)});
+                        v70_jobs.push_back({(int) (v70_inplace ? j : i), r + k, std::min(moe_v70::kJobRows, c - k)});
                 }
                 v70_goff[g + 1] = (int) v70_jobs.size();
             }
+            const size_t np = v70_inplace ? n : (size_t) MMQ_GROUP;
             v70_dev = moe_v70::job_buffer(std::max<size_t>(v70_jobs.size(), 1));
-            if (v70_dev == nullptr) {
-                basalt::log::error("basalt", "prefill: the f16 expert jobs' buffer failed");
+            v70_pdev = moe_v70::ptr_buffer(2 * np);
+            if (v70_dev == nullptr || v70_pdev == nullptr) {
+                basalt::log::error("basalt", "prefill: the f16 expert jobs' buffers failed");
                 std::exit(1);
             }
             if (!v70_jobs.empty())
                 cudaMemcpyAsync(v70_dev, v70_jobs.data(), v70_jobs.size() * sizeof(moe_v70::Job),
                                 cudaMemcpyHostToDevice, m.cs);
+            v70_ptr.assign(2 * np, nullptr);
+            if (!v70_inplace) {   // the group slots, the same for every group
+                for (size_t q = 0; q < np; ++q) {
+                    v70_ptr[q] = m.grp_gu + q * mmq_gub;
+                    v70_ptr[np + q] = m.grp_d + q * mmq_db;
+                }
+                cudaMemcpyAsync(v70_pdev, v70_ptr.data(), 2 * np * sizeof(void*), cudaMemcpyHostToDevice, m.cs);
+            }
         }
         if (grp_mapped) {
             int32_t* bh = m.grp_host + 3 * m.grp_tk;
@@ -97,6 +111,20 @@ void Prefill::Run::Chunk::Experts::Group::flush() {
 }
 
 bool Prefill::Run::Chunk::Experts::Group::compute_mmq(size_t j, const uint8_t* blob_dev, int slot) {
+    if (v70_l && v70_inplace) {   // the blob where it is; the layer's products after its last expert
+        const size_t n = order.size();
+        v70_ptr[j] = blob_dev;
+        v70_ptr[n + j] = blob_dev + lay.fmt[(size_t) l].down_off;
+        if (j + 1 < n) return true;
+        cudaMemcpyAsync(v70_pdev, v70_ptr.data(), 2 * n * sizeof(void*), cudaMemcpyHostToDevice, m.cs);
+        pf_tick((cudaStream_t) m.cs, "x.gather");
+        const int nj = (int) v70_jobs.size();
+        moe_v70::gu_swiglu(mmq_gt, v70_dev, nj, v70_pdev, 1280, N, (const uint16_t*) m.GU, (uint16_t*) m.H, m.cs);
+        pf_tick((cudaStream_t) m.cs, "x.gu");
+        moe_v70::down(v70_dev, nj, v70_pdev + n, N, 640, (const uint16_t*) m.H, m.Dm, m.cs);
+        pf_tick((cudaStream_t) m.cs, "x.down");
+        return true;
+    }
     // gather the expert into its group slot (GGUF blocks, unchanged or converted)
     const size_t q = j % MMQ_GROUP;
     if (group_gather) {
@@ -129,9 +157,9 @@ bool Prefill::Run::Chunk::Experts::Group::compute_mmq(size_t j, const uint8_t* b
     cudaMemsetAsync(m.grp_d + (size_t) ngx * mmq_db, 0, MMQ_TAIL, m.cs);
     if (v70_l) {   // the group's products on f16 tensor cores: H as f16 in H, down into Dm
         const int a = v70_goff[g], b = v70_goff[g + 1];
-        moe_v70::gu_swiglu(mmq_gt, v70_dev + a, b - a, m.grp_gu, mmq_gub, 1280, N, (const uint16_t*) m.GU, (uint16_t*) m.H, m.cs);
+        moe_v70::gu_swiglu(mmq_gt, v70_dev + a, b - a, v70_pdev, 1280, N, (const uint16_t*) m.GU, (uint16_t*) m.H, m.cs);
         pf_tick((cudaStream_t) m.cs, "x.gu");
-        moe_v70::down(v70_dev + a, b - a, m.grp_d, mmq_db, N, 640, (const uint16_t*) m.H, m.Dm, m.cs);
+        moe_v70::down(v70_dev + a, b - a, v70_pdev + MMQ_GROUP, N, 640, (const uint16_t*) m.H, m.Dm, m.cs);
         pf_tick((cudaStream_t) m.cs, "x.down");
         return true;
     }
