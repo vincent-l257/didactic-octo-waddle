@@ -30,6 +30,8 @@ three-card IQ3_S setup. Each iteration: profile, fix the largest V100 cost, rebu
 | split 10,29 | 1387 | 95.9 | 9.27 s |
 | split 10,28, --prefill 4096 (worse: keep 8192) | 1296 | 82.7 | 11.36 s |
 
+4096-chunk decode drop (82.7 vs 99.1) is not drafts (121/172 vs 122/179 accepted): the server chose
+resident=7.0GB with 4096 chunks vs 11.2GB with 8192, so expert placement differs. Not dug into.
 Split sweep: 9-10 / 28-29 are flat (~1380); wall 12.5 s vs V100 9.4 s busy, so ~3 s is pipeline fill/drain.
 Best now: `--layer-split 10,28` (serve3_iq3_1028.bat): beats two cards (1301 / 68.0) on both prompt and decode.
 
@@ -63,8 +65,17 @@ Drafter-row report over x1: 2.24 s.
     Parked: the serve prompt split (prompt_split.cpp) is for one decode card plus helpers, not layer-split decode,
     so this needs new plumbing; its ceiling is about the two-card rate (~1300), since every chunk streams the V100
     layers' experts (~16 GB IQ3_S) from RAM into the 3090 over Gen3 x8. The three-card pipeline streams none of it.
-1d. Pipeline fill (~3 s of 12.5): a short first chunk so the V100 starts sooner.
-2. (next) Experts on the V100 at ~17 TOPS of dp4a (~60% of peak): next step is int8 -> fp16 in registers and m8n8k4 HMMA
+1d. (tried, dropped) short first chunk for layer splits (BASALT_SPLIT_HEAD, prompt.cpp set_head_chunk): 2048 ->
+    1387 tok/s vs ~1370-1382 without (noise), more experts streamed. Reverted.
+2. (tried, parked) m8n8k4 FP16 expert dot (v100_hmma_experts.patch): identical output, no gain (V100 9.56 s vs
+    9.48 s dp4a). First version spilled (255 regs, up to 648 B stack); fixed by one row tile of accumulators at a
+    time. The products are bound by tile loading (IQ3_S decode in load_tiles), which both paths share.
+2b. V100 expert sub-steps at 10,28 (60 layers, inflated by per-group syncs): x.gu 2108 x.down 1200 x.gather 838
+    x.act 796 (swiglu + H quantize) x.pre 157 x.quant 65 ms. Others: qsa.attn 1109 gdn.rec 778 gdn.proj 578 hc 606
+    between 1415. Next targets: IQ3_S load_tiles on sm_70, the resident-expert gather (copies every expert into
+    group slots each chunk: ~14 ms per layer-chunk vs ~2.4 ms of bandwidth), gdn_chunked (emulated bf16 mma).
+3. Quality: PPL/KLD of the V100 changes (WMMA FP16 GEMM, hc up-mix, m8n8k4 attention) - not run yet.
+(old) Experts on the V100 at ~17 TOPS of dp4a (~60% of peak): next step is int8 -> fp16 in registers and m8n8k4 HMMA
    (exact: per-32 integer sums < 2^24), several times the dp4a rate.
 3. gdn_chunked on WMMA/FP16.
 4. (done) drafter-row report made async.

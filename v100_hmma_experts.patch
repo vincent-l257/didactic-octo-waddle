@@ -1,0 +1,149 @@
+diff --git a/src/prefill/mmq/mmq.cuh b/src/prefill/mmq/mmq.cuh
+index f57e2e0f..a8baccd8 100644
+--- a/src/prefill/mmq/mmq.cuh
++++ b/src/prefill/mmq/mmq.cuh
+@@ -198,6 +198,23 @@ static __device__ __forceinline__ void ggml_cuda_mmq_write_back_mma(
+     constexpr int ntx           = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+ 
+     const int i0 = (threadIdx.y / ntx) * (ntx*tile_C::I);
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
++    if constexpr (mmq_dp4a::hmma_on<(ggml_type) type, J>()) {   // the m8n8k4 tiles' layout (mmq_vec_dot_dp4a.cuh)
++        using Gd = mmq_dp4a::HmmaGrid<ntx, J>;
++#pragma unroll
++        for (int r = 0; r < Gd::RB; ++r)
++#pragma unroll
++            for (int q = 0; q < Gd::KC; ++q)
++#pragma unroll
++                for (int l = 0; l < 8; ++l) {
++                    const int j = (threadIdx.y % ntx) * 8 + (Gd::kc0() + q) * ntx * 8 + mmq_dp4a::hmma_col(l);
++                    const int i = i0 + (Gd::rb0() + r) * 8 + mmq_dp4a::hmma_row(l);
++                    if (j > j_max || (fallback && i > i_max)) continue;
++                    dst[ids_dst[j]*stride + i] = sum[(r * Gd::KC + q) * 8 + l];
++                }
++        return;
++    }
++#endif
+ 
+ #pragma unroll
+     for (int j0 = 0; j0 < J; j0 += ntx*tile_C::J) {
+diff --git a/src/prefill/mmq/mmq_vec_dot.cuh b/src/prefill/mmq/mmq_vec_dot.cuh
+index 80498ab6..9b388d9e 100644
+--- a/src/prefill/mmq/mmq_vec_dot.cuh
++++ b/src/prefill/mmq/mmq_vec_dot.cuh
+@@ -32,7 +32,10 @@ static __device__ __forceinline__ void ggml_cuda_mmq_vec_dot_q8_0_q8_1_mma(
+     const half2 * y_ds = (const half2 *) y;
+ 
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
+-    mmq_dp4a::q8_0_q8_1<sram_stride, ntx, J, ds_layout>(x_qs, x_df, y_qs, y_df, y_ds, sum, (threadIdx.y/ntx)*rows_per_warp, k00);
++    if constexpr (mmq_dp4a::hmma_on<type, J>())
++        mmq_dp4a::q8_0_q8_1_hmma<sram_stride, ntx, J, ds_layout>(x_qs, x_df, y_qs, y_df, y_ds, sum, (threadIdx.y/ntx)*rows_per_warp, k00);
++    else
++        mmq_dp4a::q8_0_q8_1<sram_stride, ntx, J, ds_layout>(x_qs, x_df, y_qs, y_df, y_ds, sum, (threadIdx.y/ntx)*rows_per_warp, k00);
+     return;
+ #endif
+     tile_A A[ntx][MMQ_TILE_NE_K/QI8_0];
+diff --git a/src/prefill/mmq/mmq_vec_dot_dp4a.cuh b/src/prefill/mmq/mmq_vec_dot_dp4a.cuh
+index 4cc57ff7..39962841 100644
+--- a/src/prefill/mmq/mmq_vec_dot_dp4a.cuh
++++ b/src/prefill/mmq/mmq_vec_dot_dp4a.cuh
+@@ -132,4 +132,100 @@ static __device__ __forceinline__ void q8_0_16_q8_1(const int * x_qs, const floa
+     }
+ }
+ 
++
++// ---- FP16 tensor cores (cc 7.0): int8 codes as exact halves into mma.m8n8k4, a fresh FP32 accumulator per 32 values
++// (its integer sum stays below 2^24, so it is exact and the result equals the dp4a form).  A quad-pair (lanes 4q..4q+3,
++// 4q+16..4q+19) computes 8 x 8 tiles; thread jj of it holds row jj of A and column jj of B (four k each), and C
++// register i is row (lane & 1) + 4 (lane >> 4) + 2 ((i >> 1) & 1), column (lane & 2) + 4 (i >> 2) + (i & 1).  A warp's
++// rows_per_warp x J/ntx outputs are a grid of 8 x 8 tiles split into 2 x 2 rectangles, one per quad-pair, so each
++// converted row and column feeds several products.  For J % 16 == 0 with an even count of column tiles.
++
++template <ggml_type type, int J>
++static constexpr __host__ __device__ bool hmma_on() {
++    return J % 16 == 0 && (J < 48 || J % 32 == 0) &&
++           (type == GGML_TYPE_Q2_0 || type == GGML_TYPE_Q8_0 || type == GGML_TYPE_IQ2_XXS ||
++            type == GGML_TYPE_IQ3_XXS || type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ4_XS ||
++            type == GGML_TYPE_IQ4_NL);
++}
++
++// four int8 (low byte first) as two exact half2: 1152 + c built from the biased byte, minus 1152
++static __device__ __forceinline__ void h4_of_i8x4(uint32_t x, uint32_t & lo, uint32_t & hi) {
++    const uint32_t u = x ^ 0x80808080u;
++    uint32_t l = __byte_perm(u, 0x64646464u, 0x4140), h = __byte_perm(u, 0x64646464u, 0x4342);
++    const __half2 off = __halves2half2(__float2half(1152.f), __float2half(1152.f));
++    const __half2 lh = __hsub2(*reinterpret_cast<__half2 *>(&l), off), hh = __hsub2(*reinterpret_cast<__half2 *>(&h), off);
++    lo = *reinterpret_cast<const uint32_t *>(&lh);
++    hi = *reinterpret_cast<const uint32_t *>(&hh);
++}
++
++static __device__ __forceinline__ void mma884(float (&c)[8], uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700 && __CUDA_ARCH__ < 750
++    asm volatile("mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9}, {%10,%11}, "
++                 "{%0,%1,%2,%3,%4,%5,%6,%7};\n"
++                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]), "+f"(c[4]), "+f"(c[5]), "+f"(c[6]), "+f"(c[7])
++                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1));
++#else
++    __trap();
++#endif
++}
++
++// the quad-pair's rectangle: RB row tiles from rb0, KC column tiles from kc0 (column tiles counted in the warp's own)
++template <int ntx, int J>
++struct HmmaGrid {
++    static constexpr int NRB = 2 * ntx;            // row tiles of the warp (rows_per_warp / 8)
++    static constexpr int NK  = J / (8 * ntx);      // column tiles of the warp
++    static constexpr int RB  = NRB / 2, KC = NK / 2;
++    static __device__ __forceinline__ int rb0() { return ((threadIdx.x >> 3) & 1) * RB; }   // quad-pair bit 1
++    static __device__ __forceinline__ int kc0() { return ((threadIdx.x >> 2) & 1) * KC; }   // quad-pair bit 0
++};
++static __device__ __forceinline__ int hmma_row(int i) { return (threadIdx.x & 1) + 4 * (threadIdx.x >> 4) + 2 * ((i >> 1) & 1); }
++static __device__ __forceinline__ int hmma_col(int i) { return (threadIdx.x & 2) + 4 * (i >> 2) + (i & 1); }
++
++template <int sram_stride, int ntx, int J, mmq_q8_1_ds_layout ds_layout>
++static __device__ __forceinline__ void q8_0_q8_1_hmma(const int * x_qs, const float * x_df, const int * y_qs,
++                                                      const float * y_df, const half2 * y_ds, float * sum, int i0,
++                                                      int k00) {
++    using Gd = HmmaGrid<ntx, J>;
++    constexpr int RB = Gd::RB, KC = Gd::KC;
++    const int jj = (threadIdx.x & 3) + 4 * (threadIdx.x >> 4);
++    const int rb0 = Gd::rb0(), kc0 = Gd::kc0();
++    const int * xr = x_qs + (i0 + rb0 * 8 + jj) * sram_stride;
++    const int * yc = y_qs + (kc0 * ntx * 8 + jj) * MMQ_TILE_Y_K;
++#pragma unroll
++    for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += QI8_0) {
++        const int k0 = k00 + k01;
++#pragma unroll
++        for (int r = 0; r < RB; ++r) {   // one row tile's accumulators at a time
++            float c[KC][8];
++#pragma unroll
++            for (int q = 0; q < KC; ++q)
++#pragma unroll
++                for (int i = 0; i < 8; ++i) c[q][i] = 0.0f;
++#pragma unroll 2
++            for (int kk = 0; kk < QI8_0; ++kk) {
++                uint32_t a0, a1;
++                h4_of_i8x4((uint32_t) xr[r * 8 * sram_stride + k0 + kk], a0, a1);
++#pragma unroll
++                for (int q = 0; q < KC; ++q) {
++                    uint32_t b0, b1;
++                    h4_of_i8x4((uint32_t) yc[q * ntx * 8 * MMQ_TILE_Y_K + k01 + kk], b0, b1);
++                    mma884(c[q], a0, a1, b0, b1);
++                }
++            }
++            float dA[2];
++#pragma unroll
++            for (int h = 0; h < 2; ++h) dA[h] = x_df[(i0 + (rb0 + r) * 8 + hmma_row(2 * h)) * sram_stride + k0 / QI8_0];
++#pragma unroll
++            for (int q = 0; q < KC; ++q)
++#pragma unroll
++                for (int i = 0; i < 8; ++i) {
++                    const int j = (kc0 + q) * ntx * 8 + hmma_col(i);
++                    const float dB = ds_layout == MMQ_Q8_1_DS_LAYOUT_D4 ? y_df[j * MMQ_TILE_Y_K + k01 / QI8_1]
++                                                                        : __low2float(y_ds[j * MMQ_TILE_Y_K + k01 / QI8_1]);
++                    sum[(r * KC + q) * 8 + i] += c[q][i] * dA[(i >> 1) & 1] * dB;
++                }
++        }
++    }
++}
++
+ }  // namespace mmq_dp4a
