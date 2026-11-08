@@ -1,4 +1,5 @@
 #include "experts.hpp"
+#include "pf_prof.hpp"
 #include "basalt/prefill/prefill.hpp"
 #include "basalt/core/mtp.hpp"
 #include "basalt/core/native_head.hpp"
@@ -14,6 +15,7 @@ namespace basalt::prefill {
 using namespace detail;
 
 void Prefill::Run::Chunk::Experts::Group::prepare_products() {
+    pf_tick((cudaStream_t) m.cs, "x.pre");
     if (use_mmq) {
         // the layer's activations as q8_1 rows in expert order, straight from `mixed`
         if (!fp4_l) mmq::quantize(m.mixed, m.src_dev, m.Xq, mmq_gt, N, N, T * K, m.cs);
@@ -42,6 +44,7 @@ void Prefill::Run::Chunk::Experts::Group::prepare_products() {
     } else {
         gather_rows16(m.mixed_h, m.src_dev, m.Xs, T * K, N, m.cs);
     }
+    pf_tick((cudaStream_t) m.cs, "x.quant");
     // multi-GPU: the peer's share, enqueued before the primary's own experts so both cards work at once
 }
 
@@ -98,6 +101,7 @@ bool Prefill::Run::Chunk::Experts::Group::compute_mmq(size_t j, const uint8_t* b
     const int64_t r0 = m.bounds_host[j0], nr = m.bounds_host[j + 1] - r0;
     int64_t maxr = 0;
     for (size_t i = j0; i <= j; ++i) maxr = std::max<int64_t>(maxr, m.cnt[(size_t) order[i]]);
+    pf_tick((cudaStream_t) m.cs, "x.gather");
     // the zeroed tail after the group's last expert (see MMQ_TAIL)
     cudaMemsetAsync(m.grp_gu + (size_t) ngx * mmq_gub, 0, MMQ_TAIL, m.cs);
     cudaMemsetAsync(m.grp_d + (size_t) ngx * mmq_db, 0, MMQ_TAIL, m.cs);
@@ -106,17 +110,20 @@ bool Prefill::Run::Chunk::Experts::Group::compute_mmq(size_t j, const uint8_t* b
     gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;
     gu.total_rows = T * K; gu.max_rows = maxr; gu.dst = m.GU; gu.ld_dst = 1280;
     m.mmq_ctx->run(gu, m.cs);
+    pf_tick((cudaStream_t) m.cs, "x.gu");
     const bool scaled = lay.native && lay.fmt[(size_t) l].tail != 0;
     mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs,
                 scaled ? grp_scales(m.grp_d) : nullptr,
                 m.bounds_dev + n + 1 + g * (MMQ_GROUP + 1), ngx);
     mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs);
+    pf_tick((cudaStream_t) m.cs, "x.act");
     mmq::Product dn;
     dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
     dn.n = ngx; dn.xq = m.Hq; dn.bounds = m.bounds_dev + n + 1 + g * (MMQ_GROUP + 1);
     dn.ids = m.ids_identity; dn.total_rows = nr; dn.max_rows = maxr; dn.dst = m.Dm + r0 * N;
     dn.ld_dst = N;
     m.mmq_ctx->run(dn, m.cs);
+    pf_tick((cudaStream_t) m.cs, "x.down");
     return true;
 
 }

@@ -18,6 +18,7 @@ struct Dev {
 };
 struct Prof {
     bool on = std::getenv("BASALT_PF_PROF") != nullptr;
+    int every = on ? std::atoi(std::getenv("BASALT_PF_PROF")) : 0;   // report interval in layers (>1), else the caller's
     std::mutex mu;
     Dev dev[16];
 };
@@ -47,6 +48,7 @@ void pf_report(int every) {
     cudaGetDevice(&d);
     std::lock_guard<std::mutex> lk(p.mu);
     Dev& v = p.dev[d];
+    if (p.every > 1) every = p.every;
     if (++v.calls % every) return;
     std::string line;
     char b[96];
