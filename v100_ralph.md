@@ -25,6 +25,14 @@ three-card IQ3_S setup. Each iteration: profile, fix the largest V100 cost, rebu
 | layer split 8,26 (V100 22 layers: V100 is the bottleneck again) | 1087 | 87.2 | 13.86 s |
 | + async drafter report at 8,28 (report 2242 -> 38 ms; output identical to sync) | **1231** | **91.2** | 11.69 s |
 
+| split 9,28 (async report) | 1377 | 95.8 | 9.43 s |
+| **split 10,28** | **1382** | **99.1** | 9.48 s |
+| split 10,29 | 1387 | 95.9 | 9.27 s |
+| split 10,28, --prefill 4096 (worse: keep 8192) | 1296 | 82.7 | 11.36 s |
+
+Split sweep: 9-10 / 28-29 are flat (~1380); wall 12.5 s vs V100 9.4 s busy, so ~3 s is pipeline fill/drain.
+Best now: `--layer-split 10,28` (serve3_iq3_1028.bat): beats two cards (1301 / 68.0) on both prompt and decode.
+
 Async report: src/program/serve/async_report.hpp. The last stage's rows go D2D to a spare buffer, then D2H on a
 side stream to pinned host (2 slots); a worker thread runs the drafter's prefill in order. Prefill::on_drain
 (pipeline.cpp drain_pipeline) waits for it at the end of every run. The relay copy in mtp/prefill.cpp is now
@@ -52,7 +60,11 @@ Drafter-row report over x1: 2.24 s.
 1c. User idea: read prompts on the two fast cards only (balanced cut, as the two-card run that got 1301), then hand
     the V100 layers' state (KV ~70 MB + GDN state for 18k) to the V100 for three-card decode. --prompt-dup did
     this unbalanced (5070 Ti 8 layers, 3090 40) and got 707. Make the dup prompt cut balanced and compare with 1231.
-2. Experts on the V100 at ~17 TOPS of dp4a (~60% of peak): next step is int8 -> fp16 in registers and m8n8k4 HMMA
+    Parked: the serve prompt split (prompt_split.cpp) is for one decode card plus helpers, not layer-split decode,
+    so this needs new plumbing; its ceiling is about the two-card rate (~1300), since every chunk streams the V100
+    layers' experts (~16 GB IQ3_S) from RAM into the 3090 over Gen3 x8. The three-card pipeline streams none of it.
+1d. Pipeline fill (~3 s of 12.5): a short first chunk so the V100 starts sooner.
+2. (next) Experts on the V100 at ~17 TOPS of dp4a (~60% of peak): next step is int8 -> fp16 in registers and m8n8k4 HMMA
    (exact: per-32 integer sums < 2^24), several times the dp4a rate.
 3. gdn_chunked on WMMA/FP16.
 4. (done) drafter-row report made async.
