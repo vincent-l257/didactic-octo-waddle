@@ -61,6 +61,8 @@ void act_quant_any(const float* x, int n, ActQ& a);
 
 /// The process-wide layout (empty until `expert_layout_load_text` succeeds).
 const ExpertLayout& expert_layout();
+/// --debug-layers: keep only the first n layers of the loaded layout (their blobs come first in the file).
+void expert_layout_keep(int64_t n);
 /// Loads the layout from its text (the model's `experts.layout` section: "# experts vN: ..." then one line per layer,
 /// `layer gu_type d_type offset blob_bytes`; further columns are ignored).  A newer version is refused.
 bool expert_layout_load_text(const std::string& text, int64_t n_layers, int64_t n_expert, std::string& err);

@@ -40,6 +40,12 @@ int model(Context& context) {
                 return 1;
             }
         }
+        if (o.debug_layers > 0 && o.debug_layers < g.n_layers) {
+            g.n_layers = o.debug_layers;
+            basalt::core::diagnostics().debug_layers = g.n_layers;
+            basalt::log::warn("basalt generate", "--debug-layers %lld: only the first %lld layers run; output is meaningless",
+                              (long long) g.n_layers, (long long) g.n_layers);
+        }
         using RST = basalt::kernels::RopeScalingType;
         if (!o.rope_scaling.empty()) {
             // the early validation pinned the spelling; `none` here is the CLI opting OUT of the model file's keys

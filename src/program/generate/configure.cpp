@@ -240,6 +240,7 @@ int run(int argc, char** argv) {
         if (!layout_ok) {
             return fatal_start_error(err);
         }
+        if (o.debug_layers > 0) basalt::kernels::cpu::expert_layout_keep(o.debug_layers);
         // Every layer's formats must have GPU expert kernels and a prompt-path dequantizer, checked here, before
         // anything is allocated: an unsupported type would otherwise fail from inside the first verify window or leave
         // the prompt path's fp16 buffer unwritten.

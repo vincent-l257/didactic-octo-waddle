@@ -1,4 +1,5 @@
 // src/core/expert_source.cpp - the adapter.  See the header for the three clauses of the contract.
+#include "basalt/core/diag.hpp"
 #include "basalt/core/expert_source.hpp"
 #include "basalt/core/load_progress.hpp"
 #include "basalt/core/peer_experts.hpp"
@@ -445,7 +446,9 @@ bool FileExpertSource::open(const FileRange& experts, int64_t n_layers, int64_t 
     if (!platform::file_size(path, fsize)) { err = "FileExpertSource: cannot open " + path; return false; }
     // a whole file is exactly the experts; a section must be, and lie inside the file
     const uint64_t have = experts.bytes != 0 ? experts.bytes : fsize;
-    if (have != want || experts.offset > fsize || have > fsize - experts.offset) {
+    // --debug-layers: the layout keeps the first layers, which lie at the section's start
+    const bool cut = diagnostics().debug_layers > 0 && have > want;
+    if ((have != want && !cut) || experts.offset > fsize || have > fsize - experts.offset) {
         char buf[400];
         std::snprintf(buf, sizeof buf,
                       "FileExpertSource: %s is %llu B but the loaded expert layout requires %llu B - this is not "

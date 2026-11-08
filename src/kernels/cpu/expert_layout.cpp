@@ -225,4 +225,16 @@ bool expert_layout_load_text(const std::string& text, int64_t n_layers, int64_t 
     return true;
 }
 
+void expert_layout_keep(int64_t n) {
+    ExpertLayout& L = g_layout;
+    if (n <= 0 || n >= L.n_layers) return;
+    L.n_layers = n;
+    if (L.native) {
+        L.fmt.resize((size_t) n);
+        L.offset.resize((size_t) n);
+        L.bytes.resize((size_t) n);
+        L.total = L.offset[(size_t) n - 1] + L.bytes[(size_t) n - 1] * (uint64_t) L.n_expert;
+    }
+}
+
 }  // namespace basalt::kernels::cpu

@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 #include "basalt/core/vmm.hpp"
+#include "basalt/core/diag.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -30,7 +31,9 @@ bool read_expert_profile(const FileRange& range, int64_t n_layers, int64_t n_exp
     std::memcpy(hdr, raw_file.data() + at, sizeof hdr);
     at += sizeof hdr;
     const uint32_t version = hdr[0], nl = hdr[1], ne = hdr[2], want = hdr[3], n_ranked = hdr[4];
-    if ((int64_t) nl != n_layers || (int64_t) ne != n_expert) {
+    // --debug-layers: a full model's profile serves its first layers
+    const bool cut = diagnostics().debug_layers > 0 && (int64_t) nl > n_layers;
+    if (((int64_t) nl != n_layers && !cut) || (int64_t) ne != n_expert) {
         char buf[256];
         std::snprintf(buf, sizeof buf,
                       "read_expert_profile: %s is %ux%u but this model is %lldx%lld - it is a profile for a "
@@ -51,8 +54,10 @@ bool read_expert_profile(const FileRange& range, int64_t n_layers, int64_t n_exp
         }
         std::memcpy(raw.data(), raw_file.data() + at, raw.size() * 2);
     }
+    size_t kept = 0;
     for (uint32_t i = 0; i < n_ranked; ++i) {
         const int32_t l = (int32_t) raw[(size_t) i * 2], e = (int32_t) raw[(size_t) i * 2 + 1];
+        if (cut && l >= n_layers && l < (int32_t) nl) continue;
         if (l < 0 || l >= n_layers || e < 0 || e >= n_expert) {
             char buf[256];
             std::snprintf(buf, sizeof buf, "read_expert_profile: pair %u is (layer %d, expert %d), out of range",
@@ -60,9 +65,10 @@ bool read_expert_profile(const FileRange& range, int64_t n_layers, int64_t n_exp
             err = buf;
             return false;
         }
-        ranked[(size_t) i] = {l, e};
+        ranked[kept++] = {l, e};
     }
-    slots = (int64_t) want;
+    ranked.resize(kept);
+    slots = cut ? std::min<int64_t>((int64_t) want, (int64_t) kept) : (int64_t) want;
     (void) version;   // a future format bumps it; the layout check above is what protects this reader today
     return true;
 }

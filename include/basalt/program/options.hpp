@@ -197,6 +197,8 @@ struct Options {
     /// --serve, multi-GPU layer split: "K" or "K1,K2,.." (the first layer of each later stage) or "auto" (placed
     /// from each GPU's free VRAM). "off" keeps the expert tier. Two GPUs default to auto.
     std::string layer_split;
+    /// --debug-layers N: the engine runs only the first N layers (timing work; the output is meaningless)
+    int64_t debug_layers = 0;
     bool layer_split_given = false;
     /// the later stages' devices "D1,D2,.." (default: the next visible GPUs; "0" with one K: both stages on this
     /// GPU, sharing everything - the bit-exact A/B of the hand-off)
