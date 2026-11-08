@@ -35,6 +35,20 @@ resident=7.0GB with 4096 chunks vs 11.2GB with 8192, so expert placement differs
 Split sweep: 9-10 / 28-29 are flat (~1380); wall 12.5 s vs V100 9.4 s busy, so ~3 s is pipeline fill/drain.
 Best now: `--layer-split 10,28` (serve3_iq3_1028.bat): beats two cards (1301 / 68.0) on both prompt and decode.
 
+## IQ4_XS on three cards (same build, 18k prompt, one run each)
+| setup | prompt tok/s | decode tok/s | V100 busy |
+|---|---|---|---|
+| two cards (earlier) | 992 | 55.0 | - |
+| three cards --prompt-dup (earlier) | 764 | 64.4 | - |
+| split 10,28 (V100 20 layers) | 394 | 62.7 | 32.3 s |
+| **split 10,30** (V100 18 layers; serve3_iq4_1030.bat) | **1084** | **73.6** | 10.9 s |
+| split 10,31 (more experts in RAM: decode drops) | 1079 | 69.9 | 10.8 s |
+
+At 10,28 the V100 lacks room for its own prompt buffers, borrows 1626 cache slots (3.78 GiB) and streams 3577
+experts back over x1 per prompt (~8.6 GB at 0.4 GB/s). Rule: the V100 must keep its own buffers ("CUDA2 keeps its
+own prompt buffers ... no loan" in engine.log); pick the split from that line. At 10,30: 94% of experts in VRAM,
+6% in RAM; stages CUDA0 8.1 s, CUDA1 10.2 s (7619 streamed), CUDA2 10.9 s.
+
 Async report: src/program/serve/async_report.hpp. The last stage's rows go D2D to a spare buffer, then D2H on a
 side stream to pinned host (2 slots); a worker thread runs the drafter's prefill in order. Prefill::on_drain
 (pipeline.cpp drain_pipeline) waits for it at the end of every run. The relay copy in mtp/prefill.cpp is now
