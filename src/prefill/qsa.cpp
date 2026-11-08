@@ -1,4 +1,5 @@
 #include "run.hpp"
+#include "pf_prof.hpp"
 #include "basalt/prefill/prefill.hpp"
 #include "basalt/core/mtp.hpp"
 #include "basalt/core/layout.hpp"
@@ -32,8 +33,10 @@ bool Prefill::Run::Chunk::qsa(const core::LayerView& v) {
     if (!native_proj(m.gemm, wk, m.mixed_h, m.Kc, T, v.name("attn_k.weight"), err)) return false;
     if (!native_proj(m.gemm, wv, m.mixed_h, m.Vc, T, v.name("attn_v.weight"), err)) return false;
     if (!native_proj(m.gemm, wq, m.mixed_h, m.Qf, T, v.name("attn_q.weight"), err)) return false;
+    pf_tick((cudaStream_t) m.cs, "qsa.qkv");
     if (!bf16_proj(m.gemm, wik, m.mixed_bf, m.idx_raw, T, v.name("indexer.k_proj.weight"), err)) return false;
     if (!bf16_proj(m.gemm, wiq, m.mixed_bf, m.q_idx, T, v.name("indexer.q_proj.weight"), err)) return false;
+    pf_tick((cudaStream_t) m.cs, "qsa.idxproj");
     rms_rows(m.Kc, (const float*) wkn->data, T * 2, 256, 256, EPS, m.cs);
     rope(m.Kc, T, 2, 256, 512, p0, basalt::kernels::rope_scaling(), m.cs);
     // KV streaming: this layer's cells [0, p0) come in from the host copy to the staging pool, and the
@@ -73,6 +76,7 @@ bool Prefill::Run::Chunk::qsa(const core::LayerView& v) {
     rope(m.q_idx, T, 4, 128, 512, p0, basalt::kernels::rope_scaling(), m.cs);
     // the indexer appends, token by token; then scores + selection for many queries at once:
     // a query reads completed blocks (final once completed) and `dead` for its own tail block
+    pf_tick((cudaStream_t) m.cs, "qsa.prep");
     const basalt::kernels::QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
     // the chunk's appends in three launches instead of one per token (the same end state:
     // the queries below read it only after the whole chunk is appended).
@@ -81,6 +85,7 @@ bool Prefill::Run::Chunk::qsa(const core::LayerView& v) {
                                                          EPS, ib, s, st.max_cells,
                                                          basalt::kernels::rope_scaling(), m.cs);
     } catch (const std::exception& e) { err = std::string("prefill indexer: ") + e.what(); return false; }
+    pf_tick((cudaStream_t) m.cs, "qsa.idxapp");
     for (int64_t t0 = 0; t0 < T; t0 += m.sel_batch) {
         const int64_t nb = std::min(m.sel_batch, T - t0);
         const int32_t* steps0 = m.steps_dev + t0 * basalt::kernels::kStepCount;
@@ -96,6 +101,7 @@ bool Prefill::Run::Chunk::qsa(const core::LayerView& v) {
         basalt::kernels::qsa_block_topk(m.sel_scores, steps0, nb, m.max_blocks, m.cap, s,
                                         m.sel_ids + t0 * m.cap, m.cs, active);
     }
+    pf_tick((cudaStream_t) m.cs, "qsa.score");
     const basalt::kernels::QsaAttnPools pools = staged ? pools_of(m.stage, m.ident_table)
                                                        : core::qsa_attn_pools(st);
     // the whole chunk on tensor cores, one block per (query, KV head), FP32-level
@@ -111,8 +117,10 @@ bool Prefill::Run::Chunk::qsa(const core::LayerView& v) {
                                                    s, m.attn_scratch, m.attn + t0 * ZV, nb, m.cs);
         }
     if (st.kv_rot || st.kv_hybrid) basalt::kernels::fwht256_inplace_cuda(m.attn, T * 24, m.cs);
+    pf_tick((cudaStream_t) m.cs, "qsa.attn");
     gate_attn(m.attn, m.Qf, m.attn_h, T, m.cs);
     if (!native_proj(m.gemm, wo, m.attn_h, m.bo, T, v.name("attn_output.weight"), err)) return false;
+    pf_tick((cudaStream_t) m.cs, "qsa.out");
     ++qsa_index;
     return true;
 }

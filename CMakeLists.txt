@@ -452,6 +452,7 @@ add_library(prefill STATIC src/prefill/gemm.cu src/prefill/kernels.cu src/prefil
   src/prefill/lifecycle.cpp
   src/prefill/layout.cpp
   src/prefill/projection.cpp
+  src/prefill/pf_prof.cpp
   src/prefill/draft_kv.cpp
   src/prefill/peer.cpp
   src/prefill/pipeline.cpp

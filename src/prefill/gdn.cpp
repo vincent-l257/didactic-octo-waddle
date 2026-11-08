@@ -1,4 +1,5 @@
 #include "run.hpp"
+#include "pf_prof.hpp"
 #include "basalt/prefill/prefill.hpp"
 #include "basalt/core/mtp.hpp"
 #include "basalt/core/layout.hpp"
@@ -21,11 +22,15 @@ bool Prefill::Run::Chunk::gdn(const core::LayerView& v) {
     if (!native_proj(m.gemm, wg, m.mixed_h, m.z, T, v.name("attn_gate.weight"), err)) return false;
     if (!bf16_proj(m.gemm, wa, m.mixed_bf, m.ab, T, v.name("ssm_alpha.weight"), err, 2 * HV)) return false;
     if (!bf16_proj(m.gemm, wb, m.mixed_bf, m.ab + HV, T, v.name("ssm_beta.weight"), err, 2 * HV)) return false;
+    pf_tick((cudaStream_t) m.cs, "gdn.proj");
     gdn_gates(m.ab, (const float*) wdt->data, (const float*) wsa->data, m.gate, m.beta, T, m.cs);
     gdn_conv(conv, m.qkv, (const float*) wc->data, m.hbuf, T, m.cs);
+    pf_tick((cudaStream_t) m.cs, "gdn.conv");
     // the conv input is dead after the conv: the recurrence's scratch
     gdn_recurrence(state, m.hbuf, m.gate, m.beta, m.z, (const float*) wnm->data, EPS, m.qkv, m.y, m.y_h, T, m.cs);
+    pf_tick((cudaStream_t) m.cs, "gdn.rec");
     if (!native_proj(m.gemm, wo, m.y_h, m.bo, T, v.name("ssm_out.weight"), err)) return false;
+    pf_tick((cudaStream_t) m.cs, "gdn.out");
     ++gdn_index;
     return true;
 }

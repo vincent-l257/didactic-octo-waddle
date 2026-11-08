@@ -1,4 +1,5 @@
 #include "experts.hpp"
+#include "pf_prof.hpp"
 #include "basalt/prefill/prefill.hpp"
 #include "basalt/core/mtp.hpp"
 #include "basalt/core/progress.hpp"
@@ -36,9 +37,13 @@ bool Prefill::Run::Chunk::moe(int64_t l, const core::LayerView& v) {
             guess_for = l + 1;
         }
     }
+    pf_tick((cudaStream_t) m.cs, "moe.route");
     if (!shared_expert(v, wgi, wsg, wsu, wsd)) return false;
+    pf_tick((cudaStream_t) m.cs, "moe.shared");
     Experts experts(*this, l);
-    return experts.execute();
+    const bool ok = experts.execute();
+    pf_tick((cudaStream_t) m.cs, "moe.experts");
+    return ok;
 }
 
 bool Prefill::Run::Chunk::Experts::Group::group() {

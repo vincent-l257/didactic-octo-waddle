@@ -1,4 +1,5 @@
 #include "run.hpp"
+#include "pf_prof.hpp"
 #include "basalt/prefill/prefill.hpp"
 #include "basalt/core/mtp.hpp"
 #include "basalt/core/progress.hpp"
@@ -20,6 +21,7 @@ bool Prefill::Run::Chunk::layer(int64_t l) {
     if (l == 1 && LB == 0 && ple_on) copy_ahead(1);
     // ---- the PLE block at layer 1, token by token (its conv reads the previous tokens' rows)
     if (!ple_layer(l)) return false;
+    pf_tick((cudaStream_t) m.cs, "between");
     for (int half = 0; half < 2; ++half) {
         // ---- the hyper-connection read of this half
         const char* pre = half == 0 ? "hc_attn_" : "hc_ffn_";
@@ -40,6 +42,7 @@ bool Prefill::Run::Chunk::layer(int64_t l) {
         up_mix(m.gemm, (const uint16_t*) wu->data, m.lo16, m.gated, m.R, m.grs, (const float*) wn->data,
                half == 0 ? nullptr : m.mixed, m.mixed_bf, m.mixed_h, T, m.cs);
         if (!bf16_proj(m.gemm, wi, m.xn16, m.inj, T, si, err)) return false;
+        pf_tick((cudaStream_t) m.cs, "hc");
 
         if (half == 0 && !core::is_qsa_layer(g, l)) {
             if (!gdn(v)) return false;
@@ -68,7 +71,9 @@ bool Prefill::Run::Chunk::layer(int64_t l) {
         }
         if (half == 1 && basalt::kernels::cvec().covers(l))   // --control-vector-scaled
             basalt::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
+        pf_tick((cudaStream_t) m.cs, "write");
     }
+    pf_report(64);
     return true;
 }
 
