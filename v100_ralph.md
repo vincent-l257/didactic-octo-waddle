@@ -196,6 +196,23 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
   three cards, the attention layers at long context first.
 - `serve3_split.bat` uses `%~1`: cmd splits an unquoted `10,28` at the comma. Per-split launchers `serve3_sXXYY.bat`.
 
+## Q5_0 and Q2_0 down on the V100 (262k, 18k prompt `long400`, one run each)
+
+- The fp16 expert path took IQ4_NL down only. IQ4_XS's V100 layers 31, 33, 36-41, 45-47 have Q5_0 down, which MMQ
+  lacks, so every card ran them on the FP16 dequant path (~20 of 80 SMs on the V100). IQ3_S layers 30, 36 (Q2_0
+  down) ran MMQ on the V100.
+- **Done:** TileQ5_0 and TileQ2_0 in src/prefill/moe_v70.cu; `down()` takes the type. mmq_plan marks a layer
+  `2` (MMQ on cc 7.0 only) when its gate|up fits MMQ, its down does not, and moe_v70 takes both; other cards keep
+  the FP16 path (`mmq_layer(l)`). Startup line: "prefill dequant GEMM (cc 7.0: f16 tiles)".
+- Standalone (`<scratchpad>/gt/v70down/`, 512 experts x 2560 x 640, 81,920 rows, V100): IQ4_NL 7.49 ms, Q5_0
+  8.02 ms, Q2_0 6.53 ms; vs a double reference rel rms 2.1e-4 / 2.0e-4 / 5e-7.
+- `--debug-layers 8 --layer-split 2,3` IQ4_XS (V100 layers 3-7, four Q5_0): V100 expert parts 7.2 s -> 0.5 s
+  per profile window; prompt 1487 -> 3283 tok/s (profiled).
+- Full model: IQ4_XS 10,30: 1078 / 67.0 -> **1418 / 66.7**, V100 busy 10.9 -> 5.3 s; the 3090 (8.2 s, 8960
+  streamed) is now the slowest stage. IQ3_S 10,28: 1898 / 101.6 (V100 busy 5.93 -> 5.68 s). Replies read normally.
+  Numerics changed on those layers (f16 weights); the PPL/KLD check is still owed.
+- Next for IQ4_XS: the V100 has 2.46 GiB spare beyond its buffers; 10,29 would move a layer off the 3090.
+
 ## Ideas queue
 1. (done) qsa split; attention ported.
 1b. (done) rebalanced: 8,28 best for prompts. Retry 8,27 / 9,28 once things shift again.
