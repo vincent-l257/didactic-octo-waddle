@@ -4,13 +4,8 @@ Goal: find and do everything that makes the V100 (sm_70, CUDA 12.8 cubins in bui
 three-card IQ3_S setup. Each iteration: profile, fix the largest V100 cost, rebuild, measure, record here.
 
 ## How to measure
-- Build: `cmd //c <scratchpad>/build-v100.bat` (stop the test server first: it locks the exe).
-- Server: `<scratchpad>/serve3_iq3_prof.bat` (BASALT_PF_PROF=1, port 8096, layer split 8,30, V100 = CUDA2 last stage).
-  Without the profiler: `serve3_iq3.bat` (profiler syncs per layer, so it reads slightly slow).
-- Prompt: `curl -d @<scratchpad>/long.json http://127.0.0.1:8096/v1/chat/completions` (18,096 tokens, greedy, 200 out).
-- Read `~/.cache/basalt/9ee2c74ced041f2c/engine.log`: `pf-prof: CUDA2 ...` (ms per part over 64 layers) and
-  `prompt stages: ...` (busy per card, hand-off, report).
-- Greedy identity: compare the reply with the previous run's json in the scratchpad.
+The full method is in `v100_howto.md`: the machine and the layer split (with each V100 layer's expert types), the
+sm_70 build, the launchers and scripts, standalone kernel benches, and how the V100 kernels were written and wired in.
 
 ## Results (IQ3_S, 18k prompt, 32k context, one run each)
 | change | prompt tok/s | decode tok/s | V100 busy |
@@ -80,6 +75,10 @@ hc8 read at T=3, us (V100 / 3090): norm 4.9/3.6, down 34.7/17.1, up 19.1/15.7.
   The pack is mixed-quant: V100 layers 28-47 gate|up are IQ3_XXS x9, IQ2_S x4, IQ3_S x6, IQ4_XS x1 (down IQ4_NL,
   Q2_0 on 30 and 36), so only 6 layers take it so far: prompt 1371 -> 1417 tok/s, decode 104.1, V100 busy 9.08 s.
   Next: IQ3_XXS / IQ2_S / IQ4_XS tiles (agent), then the repacked layouts.
+- **Done:** IQ3_XXS, IQ2_S and IQ4_XS gate|up tiles (standalone, skewed 81,920 rows, fused swiglu: 13.4 / 13.5 /
+  12.3 ms, 40-44 TFLOPS; ~1.3e-3 rel. error). 18 of the V100's 20 layers now take the f16 path (30 and 36 keep MMQ:
+  Q2_0 down). IQ3_S 10,28, 262k, long400: prompt 1526 tok/s (from 1371 before the path), decode 99.2 (run-to-run
+  spread today 99-104), V100 busy 8.22 s vs 3090 6.86 s: the V100 is still the slowest stage. Reply opens the same.
 Specs (V100 PCIe / 3090): FP32 14 / 36 TFLOPS; FP16 tensor fp32-acc ~112 / ~71; INT8 dp4a ~56 / int8 TC ~284;
 bandwidth 900 / 936 GB/s. The V100 wins only on fp16 tensor cores.
 Ranked queue (agent estimates, unmeasured unless noted):
