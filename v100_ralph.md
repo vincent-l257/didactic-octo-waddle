@@ -73,6 +73,13 @@ hc8 read at T=3, us (V100 / 3090): norm 4.9/3.6, down 34.7/17.1, up 19.1/15.7.
   776-818, Q6_K 483-640. V100 ~1.3x the 3090 (about the clock ratio), so queue item 1 is ~0.5 ms, not ~1 ms.
 - expert_fp16.cpp (dequant to fp16 + WMMA GEMM per expert) is not an option: ~160-row GEMMs fill ~20 of 80 SMs.
   A grouped fp16-HMMA kernel (sFNX k_moe_mma style) is being written standalone in `<scratchpad>/gt/moe70/`.
+- **Done:** prompt experts on f16 tensor cores on cc 7.0 (src/prefill/moe_v70.cu, from `<scratchpad>/gt/moe70/`;
+  standalone at 81,920 rows: IQ3_S gate|up+swiglu 14.9 ms / 36 TFLOPS, IQ4_NL down 7.7 ms / 35 TFLOPS, ggml layout;
+  repacked layouts 11.9 / 6.5 ms; ~1e-3 rel. error vs a double reference). Wired into compute_mmq per group
+  (v70_l: f16 rows from mixed_h into GU, job list per group, fused swiglu H f16 into H, down into Dm).
+  The pack is mixed-quant: V100 layers 28-47 gate|up are IQ3_XXS x9, IQ2_S x4, IQ3_S x6, IQ4_XS x1 (down IQ4_NL,
+  Q2_0 on 30 and 36), so only 6 layers take it so far: prompt 1371 -> 1417 tok/s, decode 104.1, V100 busy 9.08 s.
+  Next: IQ3_XXS / IQ2_S / IQ4_XS tiles (agent), then the repacked layouts.
 Specs (V100 PCIe / 3090): FP32 14 / 36 TFLOPS; FP16 tensor fp32-acc ~112 / ~71; INT8 dp4a ~56 / int8 TC ~284;
 bandwidth 900 / 936 GB/s. The V100 wins only on fp16 tensor cores.
 Ranked queue (agent estimates, unmeasured unless noted):
