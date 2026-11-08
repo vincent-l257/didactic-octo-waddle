@@ -31,8 +31,10 @@ Flow Request::complete() {
                                                      " ms/window for it)").c_str());
         const std::string evr = basalt::core::decode_events().report();
         if (!evr.empty()) basalt::log::raw("%s\n", evr.c_str());
-        const std::string pr = runtime_.ver.profile_report();
-        if (!pr.empty()) basalt::log::raw("basalt decode GPU stages (ms/window):%s\n", pr.c_str());
+        for (size_t k = 0; k <= runtime_.stages.size(); ++k) {
+            const std::string pr = (k == 0 ? runtime_.ver : runtime_.stages[k - 1]->ver).profile_report();
+            if (!pr.empty()) basalt::log::raw("basalt decode GPU stages, stage %zu (ms/window):%s\n", k + 1, pr.c_str());
+        }
     }
     if (!cancelled) {
         // a prompt stopped halfway leaves the session somewhere between two chunks: nothing to continue from
