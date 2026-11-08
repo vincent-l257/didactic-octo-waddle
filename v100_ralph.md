@@ -221,6 +221,12 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
 | 10,29 fixed | 438 | 57.9 | 27.7 s | 3,599 | fine |
 - With 19 layers the V100 fills its free memory with cache and its prompt path borrows 1,634 slots (3.78 GiB);
   those experts stream over Gen2 x1 every chunk. 10,30 is the IQ4_XS split: the V100 must not lend.
+| 10,29, V100 keeps its buffers | 1,524 | 69.3 | 5.4 s | 0 | fine |
+- The V100 had 4.79 GiB free for 3.78 GiB of buffers but the "keep own buffers" rule wanted 1.5 GiB more. Later
+  stages now need 0.75 GiB (CUDA0, which builds the draft head after, keeps 1.5). ~0.4 GiB was left on the V100
+  after a 199k prompt.
+- 199k (`huge190`): 10,29 2,454 tok/s / 65.6 decode (busy 75.1 / 77.5 / 72.0 s) vs 10,30 2,233 / 64.0
+  (82.5 / 85.1 / 71.7 s). 10,28 would make the V100 lend again (1.47 GB more experts).
 - Bug: the cc 7.0 in-place path checked `cache->slot_of` (the cache's own table), so lent slots, holding the
   prompt buffers, were read as weights. Now it checks this read's residency (`host_res`). No change when nothing
   is lent.
