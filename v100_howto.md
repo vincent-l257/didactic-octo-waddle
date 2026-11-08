@@ -60,6 +60,18 @@ The method behind `v100_ralph.md` (results and queue live there). `<sp>` is the 
   - `decode timing:` gives windows, avg T, tokens per window and verify ms.
 - Nsight Systems hangs this engine on this box (through serve and through `--serve` stdin alike). Don't use it.
 
+## Fast restarts: a few layers only
+- `--debug-layers N` makes the engine run only the first N layers; the output is meaningless.
+  - It caps the geometry and truncates the expert layout to those layers' blobs. A full profile serves the first
+    layers.
+  - Load takes ~47 s for 12 layers against ~2 min 15 s for 48. The head, embeddings and other dense weights still
+    load.
+- `<sp>/serve3_dbg12.bat`: 12 layers split `4,8`, so the V100 runs layers 8-11 (three GDN layers plus one QSA,
+  the model's mix).
+- Each stage carries ~2 s of fixed per-prompt cost (embedding, hand-off, per-chunk setup). Compare runs at the same
+  N, or take the difference between two N, rather than scaling to 48.
+- Don't run it while something else is timing kernels on the V100.
+
 ## Changing a V100 kernel without reloading the weights
 - Start the server with `BASALT_SM70_HOT=1` (`<sp>/serve3_iq3_1028_hot.bat`).
 - After editing a .cu file, rebuild only its cubin while the server runs. The exe is locked, but the cubins aren't:
