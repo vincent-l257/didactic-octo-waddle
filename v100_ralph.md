@@ -213,6 +213,18 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
   Numerics changed on those layers (f16 weights); the PPL/KLD check is still owed.
 - Next for IQ4_XS: the V100 has 2.46 GiB spare beyond its buffers; 10,29 would move a layer off the 3090.
 
+## IQ4_XS 10,29 and a V100 lending bug (262k, 18k prompt `long400`, one run each)
+| Split | Prompt tok/s | Decode | V100 busy | V100 streamed | Reply |
+|---|---|---|---|---|---|
+| 10,30 | 1,420 | 67.5 | 5.3 s | 0 (no loan) | fine |
+| 10,29 before fix | 493 | 112 | 22.4 s | 2,682 | "!!!!" |
+| 10,29 fixed | 438 | 57.9 | 27.7 s | 3,599 | fine |
+- With 19 layers the V100 fills its free memory with cache and its prompt path borrows 1,634 slots (3.78 GiB);
+  those experts stream over Gen2 x1 every chunk. 10,30 is the IQ4_XS split: the V100 must not lend.
+- Bug: the cc 7.0 in-place path checked `cache->slot_of` (the cache's own table), so lent slots, holding the
+  prompt buffers, were read as weights. Now it checks this read's residency (`host_res`). No change when nothing
+  is lent.
+
 ## Ideas queue
 1. (done) qsa split; attention ported.
 1b. (done) rebalanced: 8,28 best for prompts. Retry 8,27 / 9,28 once things shift again.
@@ -245,7 +257,8 @@ Loop stopped (2026-11-07): the rest are each <= ~5% of the V100's 9.5 s.
    (exact: per-32 integer sums < 2^24), several times the dp4a rate.
 3. gdn_chunked on WMMA/FP16.
 4. (done) drafter-row report made async.
-5. Rebalance layer split once the V100 is faster (more layers to it).
+5. Rebalance layer split once the V100 is faster (more layers to it). IQ4_XS: only with a cap on the V100 cache
+   so its prompt path never borrows (10,29 lends and streams over x1).
 6. Decode kernels on the V100 (qsa_dec_attn, head).
 
 ## Not to do

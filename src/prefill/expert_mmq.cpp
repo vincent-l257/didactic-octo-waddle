@@ -32,8 +32,10 @@ void Prefill::Run::Chunk::Experts::Group::prepare_products() {
                     m.bounds_host[std::min(n, g * MMQ_GROUP + i)] - m.bounds_host[g * MMQ_GROUP];
         if (v70_l) {   // every group's jobs: its experts' rows in runs of at most kJobRows
             const auto& f = lay.fmt[(size_t) l];
-            v70_inplace = m.cache != nullptr && n > 0 && f.up_off == mmq_gub / 2;
-            for (size_t j = 0; v70_inplace && j < n; ++j) v70_inplace = m.cache->slot_of(l, order[j]) >= 0;
+            // resident for this read: a slot the prompt path borrows holds its buffers, not the expert
+            v70_inplace = m.cache != nullptr && m.host_res != nullptr && n > 0 && f.up_off == mmq_gub / 2;
+            for (size_t j = 0; v70_inplace && j < n; ++j)
+                v70_inplace = m.host_res[(size_t) l * m.g->n_expert + order[j]] >= 0;
             v70_jobs.clear();
             v70_goff.assign(ng + 1, 0);
             for (size_t g = 0; g < ng; ++g) {
