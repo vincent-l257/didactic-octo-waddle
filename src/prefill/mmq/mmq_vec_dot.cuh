@@ -10,6 +10,7 @@
 using namespace ggml_cuda_mma;
 
 #include "mmq.cuh"
+#include "mmq_vec_dot_dp4a.cuh"
 
 template <ggml_type type, int J, bool fallback, mmq_q8_1_ds_layout ds_layout>
 static __device__ __forceinline__ void ggml_cuda_mmq_vec_dot_q8_0_q8_1_mma(
@@ -30,6 +31,10 @@ static __device__ __forceinline__ void ggml_cuda_mmq_vec_dot_q8_0_q8_1_mma(
     const float * y_df = (const float *) y;
     const half2 * y_ds = (const half2 *) y;
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
+    mmq_dp4a::q8_0_q8_1<sram_stride, ntx, J, ds_layout>(x_qs, x_df, y_qs, y_df, y_ds, sum, (threadIdx.y/ntx)*rows_per_warp, k00);
+    return;
+#endif
     tile_A A[ntx][MMQ_TILE_NE_K/QI8_0];
     float dA[ntx][tile_C::ne/2][MMQ_TILE_NE_K/QI8_0];
 
@@ -109,6 +114,10 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     const int   * y_qs = (const int   *) y + 4;
     const half2 * y_dm = (const half2 *) y;
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
+    mmq_dp4a::q8_1_q8_1<sram_stride, ntx, J>(x_qs, x_dm, y_qs, y_dm, sum, (threadIdx.y/ntx)*rows_per_warp, k00);
+    return;
+#endif
     tile_A   A[ntx][MMQ_TILE_NE_K/QI8_1];
     float2 dmA[ntx][tile_C::ne/2][MMQ_TILE_NE_K/QI8_1];
 
@@ -189,6 +198,10 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
 
     const int i0 = (threadIdx.y / ntx) * (ntx*tile_A::I);
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
+    mmq_dp4a::q8_0_16_q8_1<sram_stride, ntx, J>(x_qs, x_df, y_qs, y_df, sum, i0, k00);
+    return;
+#endif
     tile_A  A[ntx][8];
     float  dA[ntx][tile_C::ne/2][8];
 
