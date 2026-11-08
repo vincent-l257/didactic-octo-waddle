@@ -121,7 +121,7 @@ bool Prefill::Run::Chunk::Experts::Group::compute_mmq(size_t j, const uint8_t* b
         const int nj = (int) v70_jobs.size();
         moe_v70::gu_swiglu(mmq_gt, v70_dev, nj, v70_pdev, 1280, N, (const uint16_t*) m.GU, (uint16_t*) m.H, m.cs);
         pf_tick((cudaStream_t) m.cs, "x.gu");
-        moe_v70::down(v70_dev, nj, v70_pdev + n, N, 640, (const uint16_t*) m.H, m.Dm, m.cs);
+        moe_v70::down(mmq_dt, v70_dev, nj, v70_pdev + n, N, 640, (const uint16_t*) m.H, m.Dm, m.cs);
         pf_tick((cudaStream_t) m.cs, "x.down");
         return true;
     }
@@ -159,7 +159,7 @@ bool Prefill::Run::Chunk::Experts::Group::compute_mmq(size_t j, const uint8_t* b
         const int a = v70_goff[g], b = v70_goff[g + 1];
         moe_v70::gu_swiglu(mmq_gt, v70_dev + a, b - a, v70_pdev, 1280, N, (const uint16_t*) m.GU, (uint16_t*) m.H, m.cs);
         pf_tick((cudaStream_t) m.cs, "x.gu");
-        moe_v70::down(v70_dev + a, b - a, v70_pdev + MMQ_GROUP, N, 640, (const uint16_t*) m.H, m.Dm, m.cs);
+        moe_v70::down(mmq_dt, v70_dev + a, b - a, v70_pdev + MMQ_GROUP, N, 640, (const uint16_t*) m.H, m.Dm, m.cs);
         pf_tick((cudaStream_t) m.cs, "x.down");
         return true;
     }

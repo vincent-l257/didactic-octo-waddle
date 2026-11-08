@@ -92,7 +92,7 @@ struct Prefill::Run::Chunk::Experts {
     // keep MMQ.  A native pack's layer takes the native kernels
     // (moe_fused_iq.hpp) where they cover its two formats, else MMQ (or the FP16 path: IQ1_M).
     const basalt::kernels::cpu::ExpertLayout& lay = basalt::kernels::cpu::expert_layout();
-    const bool use_mmq = mmq_plan().any && mmq_plan().layer[(size_t) l];
+    const bool use_mmq = mmq_layer(l);
     const int mmq_gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42;
     const int mmq_dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
     // NVFP4 experts: FP4 block-scaled tensor cores, read in place from the blobs
@@ -211,7 +211,7 @@ struct Prefill::Run::Chunk::Experts::Group {
     int32_t* src_h = grp_mapped ? m.grp_host + 2 * m.grp_tk : m.src_host.data();
     const bool cpu_maybe = owner.cpu_pool_ != nullptr && !stream_all && m.src != nullptr && lay.native &&
                            owner.next_ == nullptr && owner.stage_lb_ == 0;
-    const bool pre_mmq = mmq_plan().any && mmq_plan().layer[(size_t) l];
+    const bool pre_mmq = mmq_layer(l);
     std::vector<char> on_peer;
     int64_t rows_local = T * K, rows_peer = 0;
     std::vector<int32_t> order, order_peer;

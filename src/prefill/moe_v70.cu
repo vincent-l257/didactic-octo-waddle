@@ -2,7 +2,7 @@
 // f16 in shared memory (block scale folded in), f16 activations, mma.m8n8k4 with f32 accumulation.  One launch covers
 // a list of jobs (an expert and up to 64 consecutive sorted rows); a row's input and output share its index.
 // gate|up writes silu(gate) * up as f16 H; down writes f32 rows.  Weights are read in ggml's layout (IQ3_XXS, IQ3_S, IQ2_S
-// or IQ4_XS gate|up, IQ4_NL down).
+// or IQ4_XS gate|up, IQ4_NL, Q5_0 or Q2_0 down).
 #include "basalt/prefill/moe_v70.hpp"
 
 #include <cuda_fp16.h>
@@ -197,6 +197,79 @@ struct TileIQ4NLR {
     __device__ __forceinline__ void put(__half* dst, const uint32_t*) const {
         if (!live) return zero_put(dst);
         iq4nl_put(q, __half2half2(__ushort_as_half(d)), dst);
+    }
+};
+
+// Q5_0 as stored by ggml: 22-byte blocks of 32 (2-byte aligned): d, qh (bit j: 5th bit of weight j), 16 nibble bytes
+// (low nibbles weights 0-15, high 16-31); weight = (q - 16) d
+struct TileQ5_0 {
+    static constexpr int QK = 32;
+    static constexpr int GRID_WORDS = 0;
+    __device__ static void load_grid(uint32_t*) {}
+    uint16_t d;
+    uint32_t qh, q[4];
+    bool live;
+    __device__ __forceinline__ void fetch(const uint8_t* ew, int wrow, int, int K, int k0) {
+        live = wrow >= 0;
+        if (!live) return;
+        const uint16_t* p = reinterpret_cast<const uint16_t*>(ew + ((size_t) wrow * (K / 32) + k0 / 32 + kq_part()) * 22);
+        d = p[0];
+        qh = (uint32_t) p[1] | ((uint32_t) p[2] << 16);
+#pragma unroll
+        for (int w = 0; w < 4; ++w) q[w] = (uint32_t) p[3 + 2 * w] | ((uint32_t) p[4 + 2 * w] << 16);
+    }
+    __device__ __forceinline__ void put(__half* dst, const uint32_t*) const {
+        if (!live) return zero_put(dst);
+        const __half2 dd = __half2half2(__ushort_as_half(d));
+        const __half2 k1040 = h2bits(0x64106410u);
+        uint32_t v[16];
+#pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            // 4 qh bits to bit 4 of bytes 0..3
+            const uint32_t hl = (((qh >> (4 * w)) & 0xF) * 0x02040810u) & 0x10101010u;
+            const uint32_t hh = (((qh >> (16 + 4 * w)) & 0xF) * 0x02040810u) & 0x10101010u;
+            const uint32_t lo = (q[w] & 0x0F0F0F0Fu) | hl, hi = ((q[w] >> 4) & 0x0F0F0F0Fu) | hh;
+            v[2 * w] = bits(__hmul2(__hsub2(h2bits(__byte_perm(lo, 0x64646464u, 0x4140)), k1040), dd));
+            v[2 * w + 1] = bits(__hmul2(__hsub2(h2bits(__byte_perm(lo, 0x64646464u, 0x4342)), k1040), dd));
+            v[8 + 2 * w] = bits(__hmul2(__hsub2(h2bits(__byte_perm(hi, 0x64646464u, 0x4140)), k1040), dd));
+            v[8 + 2 * w + 1] = bits(__hmul2(__hsub2(h2bits(__byte_perm(hi, 0x64646464u, 0x4342)), k1040), dd));
+        }
+        store16(dst + kq_row() * LD + kq_part() * 32, v);
+    }
+};
+
+// Q2_0: 18-byte blocks of 64 (2-byte aligned): d, then 2 bits per weight (weight j: byte j / 4, bits 2 (j % 4));
+// weight = (q - 1) d.  A thread's 32 weights are bytes 8 kq_part() .. + 8 of the step's block.
+struct TileQ2_0 {
+    static constexpr int QK = 64;
+    static constexpr int GRID_WORDS = 0;
+    __device__ static void load_grid(uint32_t*) {}
+    uint16_t d;
+    uint32_t q[2];
+    bool live;
+    __device__ __forceinline__ void fetch(const uint8_t* ew, int wrow, int, int K, int k0) {
+        live = wrow >= 0;
+        if (!live) return;
+        const uint16_t* p = reinterpret_cast<const uint16_t*>(ew + ((size_t) wrow * (K / 64) + k0 / 64) * 18);
+        d = p[0];
+        const uint16_t* qs = p + 1 + 4 * kq_part();
+        q[0] = (uint32_t) qs[0] | ((uint32_t) qs[1] << 16);
+        q[1] = (uint32_t) qs[2] | ((uint32_t) qs[3] << 16);
+    }
+    __device__ __forceinline__ void put(__half* dst, const uint32_t*) const {
+        if (!live) return zero_put(dst);
+        const __half2 dd = __half2half2(__ushort_as_half(d));
+        const __half2 k1025 = h2bits(0x64016401u);
+        uint32_t v[16];
+#pragma unroll
+        for (int b = 0; b < 8; ++b) {
+            // byte b's 4 codes to bytes 0..3 of t (weights 4b .. 4b + 3)
+            const uint32_t B = (q[b >> 2] >> (8 * (b & 3))) & 0xFF;
+            const uint32_t t = (B | (B << 6) | (B << 12) | (B << 18)) & 0x03030303u;
+            v[2 * b] = bits(__hmul2(__hsub2(h2bits(__byte_perm(t, 0x64646464u, 0x4140)), k1025), dd));
+            v[2 * b + 1] = bits(__hmul2(__hsub2(h2bits(__byte_perm(t, 0x64646464u, 0x4342)), k1025), dd));
+        }
+        store16(dst + kq_row() * LD + kq_part() * 32, v);
     }
 };
 
@@ -592,8 +665,9 @@ void launch(const Job* jobs, int nj, const void* const* w, int M, int K, const u
 }  // namespace
 
 bool enabled() { return basalt::kernels::sm70_current(); }
-bool usable(int gu_type, int d_type) {   // IQ3_XXS, IQ3_S, IQ2_S or IQ4_XS gate|up; IQ4_NL down
-    return (gu_type == 18 || gu_type == 21 || gu_type == 22 || gu_type == 23) && d_type == 20;
+bool usable(int gu_type, int d_type) {   // IQ3_XXS, IQ3_S, IQ2_S or IQ4_XS gate|up; IQ4_NL, Q5_0 or Q2_0 down
+    return (gu_type == 18 || gu_type == 21 || gu_type == 22 || gu_type == 23) &&
+           (d_type == 20 || d_type == 6 || d_type == 42);
 }
 
 namespace {
@@ -631,8 +705,15 @@ void gu_swiglu(int gu_type, const Job* jobs, int nj, const void* const* w, int M
         default: break;
     }
 }
-void down(const Job* jobs, int nj, const void* const* w, int M, int K, const uint16_t* h, float* out, void* stream) {
-    launch<TileIQ4NL, 0>(jobs, nj, w, M, K, h, out, nullptr, (cudaStream_t) stream);
+void down(int d_type, const Job* jobs, int nj, const void* const* w, int M, int K, const uint16_t* h, float* out,
+          void* stream) {
+    const cudaStream_t s = (cudaStream_t) stream;
+    switch (d_type) {
+        case 20: launch<TileIQ4NL, 0>(jobs, nj, w, M, K, h, out, nullptr, s); break;
+        case 6: launch<TileQ5_0, 0>(jobs, nj, w, M, K, h, out, nullptr, s); break;
+        case 42: launch<TileQ2_0, 0>(jobs, nj, w, M, K, h, out, nullptr, s); break;
+        default: break;
+    }
 }
 
 }  // namespace basalt::prefill::moe_v70

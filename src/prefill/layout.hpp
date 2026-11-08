@@ -54,7 +54,7 @@ constexpr size_t MMQ_TAIL = 4096;
 constexpr size_t MMQ_SCALES = (size_t) MMQ_GROUP * 16;
 struct MmqPlan {
     bool any = false, fallback = true;
-    std::vector<char> layer;                   // per layer: MMQ
+    std::vector<char> layer;                   // per layer: 1 MMQ, 2 MMQ on cc 7.0 only (moe_v70), else FP16
     size_t gu_max = 0, d_max = 0;
 };
 
@@ -81,6 +81,8 @@ struct Fp4Ptrs {
 // Where the FP4 path's tables sit in Xq (the layer's token planes) and Hq (a group's H), as moe_bufs sized them.
 
 const MmqPlan& mmq_plan();
+/// Layer l takes the MMQ path on the current device.
+bool mmq_layer(int64_t l);
 float* grp_scales(uint8_t* grp_d);
 void take_stage(Alloc& o, const core::SessionState& ss, const basalt::kernels::QsaShapes& s,
                 basalt::kernels::KvHostPools& st, bool& ok);
