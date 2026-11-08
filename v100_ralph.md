@@ -66,6 +66,15 @@ hc8 read at T=3, us (V100 / 3090): norm 4.9/3.6, down 34.7/17.1, up 19.1/15.7.
 - **Done:** hc8_down with coalesced 4-column lanes (256 threads): V100 down 34.7 -> 21.4 us, 3090 neutral; hc8_parity
   ok (T-bitwise). Decode 90.1 -> 92.1 tok/s (IQ3_S 10,28, 262k, 18k prompt). Numerics: summation order only.
 - Tried, dropped: norm folded into down (registers, slower); up with 16-byte loads (slower at T>=3).
+- Draft threshold A/B (BASALT_DRAFT_TH temp override, IQ3_S 10,28, 262k, long400, no profiler; same greedy text):
+  default 0.35: 102.1 tok/s (T 3.24, 2.46 tok/window, verify 21.66 ms); 0.15: 96.3 (T 4.01, 2.60, 24.10);
+  0.5: 101.5 (T 3.13, 2.41, 21.30). A row costs ~3 ms here (10 more experts per token), not ~0: default stays.
+- native_mmvq alone (`<scratchpad>/gt/mmb.cu`), T=3: V100 Q8_0 575-654 GB/s, Q6_K 400-465 GB/s; 3090 Q8_0
+  776-818, Q6_K 483-640. V100 ~1.3x the 3090 (about the clock ratio), so queue item 1 is ~0.5 ms, not ~1 ms.
+- expert_fp16.cpp (dequant to fp16 + WMMA GEMM per expert) is not an option: ~160-row GEMMs fill ~20 of 80 SMs.
+  A grouped fp16-HMMA kernel (sFNX k_moe_mma style) is being written standalone in `<scratchpad>/gt/moe70/`.
+Specs (V100 PCIe / 3090): FP32 14 / 36 TFLOPS; FP16 tensor fp32-acc ~112 / ~71; INT8 dp4a ~56 / int8 TC ~284;
+bandwidth 900 / 936 GB/s. The V100 wins only on fp16 tensor cores.
 Ranked queue (agent estimates, unmeasured unless noted):
 Decode (per window; V100 stage 12.8 ms of 22.9 verify):
 1. Dense GEMV for sm_70 in sFNX's q8s shape (warp per 1-4 rows, 16 B loads, T-templated, q|k|v segments in one
