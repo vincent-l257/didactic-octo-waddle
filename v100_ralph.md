@@ -84,6 +84,13 @@ hc8 read at T=3, us (V100 / 3090): norm 4.9/3.6, down 34.7/17.1, up 19.1/15.7.
   pointer table, one gate|up and one down launch per layer. Prompt 1526 -> 1581 tok/s, V100 busy 8.22 -> 7.78 s,
   reply bitwise the same as the per-group launches (md5). Profile before it (per group): x.gu 1337, x.down 866,
   x.gather 1113 ms (60 layers, sync-inflated).
+- **Done:** DeltaNet prompt recurrence in FP32 SIMT on cc 7.0 (src/prefill/gdn70.cu, from `<scratchpad>/gt/gdn70/`,
+  modeled on sFNX gdn_prompt.cuh; gdn_recurrence dispatches to it on sm70_current()). Standalone at 8192 tokens:
+  22.47 -> 6.31 ms per layer chunk, error vs a double reference 3.8e-3 -> 5e-7 (q/k stay FP32). End to end
+  (long400): prompt 1581 -> 1672 tok/s, decode 100.8, V100 busy 7.78 -> 7.22 s.
+- 199,003-token prompt (`<scratchpad>/huge190.json`), same build: prompt 2085 tok/s, decode 92.6. Stages equally
+  busy (88-92 s of 94.6 s); CUDA0/CUDA1 stream ~42k/40k experts; hand-off CUDA0 18.7 s, CUDA1 37.2 s. Target: the
+  user's headless Linux two cards, ~4,000 tok/s on a ~190k prompt (decode >100, from memory).
 - Two cards (5070 Ti + 3090, 262k): 1301 / 68.0 on Windows (bin\basalt.exe, earlier). Same build as three cards
   (serve2_iq3_v100build.bat, auto split 0-22 / 23-47, 44% of experts in RAM), long400: 1271 / 70.9. Three cards:
   1581 / ~100. Three cards only run on Windows (driver); the user's headless Linux two-card is faster than Windows
