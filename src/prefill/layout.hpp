@@ -54,7 +54,7 @@ constexpr size_t MMQ_TAIL = 4096;
 constexpr size_t MMQ_SCALES = (size_t) MMQ_GROUP * 16;
 struct MmqPlan {
     bool any = false, fallback = true;
-    std::vector<char> layer;                   // per layer: 1 MMQ, 2 MMQ on cc 7.0 only (moe_v70), else FP16
+    std::vector<char> layer;                   // per layer: 1 MMQ, else FP16
     size_t gu_max = 0, d_max = 0;
 };
 

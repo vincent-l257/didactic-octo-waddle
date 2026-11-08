@@ -1,6 +1,5 @@
 #include "context.hpp"
 #include "run.hpp"
-#include "basalt/prefill/moe_v70.hpp"
 
 namespace basalt::program::generate {
 
@@ -283,9 +282,7 @@ int run(int argc, char** argv) {
                          basalt::kernels::dec_moe_formats_ok(f.gu_type, f.d_type, f.n_embd, f.n_ff)
                              ? "device-planned tail + grouped kernels" : "grouped kernels",
                          basalt::prefill::mmq::fits(f.gu_type, 2 * f.n_ff) && basalt::prefill::mmq::fits(f.d_type, f.n_embd)
-                             ? "MMQ"
-                             : f.tail == 0 && basalt::prefill::moe_v70::usable(f.gu_type, f.d_type)
-                                   ? "dequant GEMM (cc 7.0: f16 tiles)" : "dequant GEMM");
+                             ? "MMQ" : "dequant GEMM");
             l = e + 1;
         }
     }

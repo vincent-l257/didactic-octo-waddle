@@ -231,6 +231,16 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
   prompt buffers, were read as weights. Now it checks this read's residency (`host_res`). No change when nothing
   is lent.
 
+## Q5_0 on MMQ (IQ4_XS 10,29, 262k, one run each)
+- MMQ lacked Q5_0, so the 5070 Ti and 3090 ran IQ4_XS's Q5_0-down layers on the FP16 dequant path. Added
+  `ggml_cuda_mmq_load_tiles_q5_0` (the Q5_1 unpack minus 16, Q8_0 tile layout, D4 activations) and its instance;
+  the cc 7.0-only plan value is gone (the V100 still takes moe_v70 for these layers).
+- prefill_mmq_kq_test, IQ3_XXS / IQ4_XS gate|up with Q5_0 down: MMQ vs double reference rel RMS 1.0e-2 / 9.8e-3
+  (plain), 1.4e-2 (outliers), same as the other formats. Bench, 16 experts: 1.5-3.6x the FP16 path.
+- 18k: 1,524 / 69.3 -> **1,688 / 73.4**. 199k: 2,454 / 65.6 -> **2,571 / 64.7** (busy 71.5 / 74.1 / 72.1 s).
+- Open: in that test the FP16 path is ~20% off the reference for IQ3_XXS gate|up or Q5_0 down (Q4_K / Q8_0 is
+  fine) though its dequantized weights match ggml's; not found yet. No pack layer takes that path for them now.
+
 ## Ideas queue
 1. (done) qsa split; attention ported.
 1b. (done) rebalanced: 8,28 best for prompts. Retry 8,27 / 9,28 once things shift again.

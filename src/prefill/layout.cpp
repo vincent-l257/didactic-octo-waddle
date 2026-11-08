@@ -8,7 +8,6 @@
 #include "basalt/kernels/cpu/expert_layout.hpp"
 #include "basalt/kernels/cpu/pool.hpp"
 #include "basalt/kernels/qsa.hpp"
-#include "basalt/prefill/moe_v70.hpp"
 #include "basalt/kernels/kv_stream.hpp"
 #include "basalt/kernels/kv_q4.hpp"
 #include "basalt/core/layer.hpp"
@@ -117,16 +116,6 @@ const MmqPlan& mmq_plan() {
         p.fallback = !on || layers <= 0;
         for (int64_t l = 0; on && l < layers; ++l) {
             const int gt = lay.native ? lay.fmt[(size_t) l].gu_type : 42, dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
-            // a down type MMQ lacks but the cc 7.0 kernels take: those cards run the layer there, the rest the FP16 path
-            if (lay.native && lay.fmt[(size_t) l].tail == 0 && mmq::fits(gt, 1280) && !mmq::supported(dt) &&
-                moe_v70::usable(gt, dt)) {
-                p.layer[(size_t) l] = 2;
-                p.any = true;
-                p.fallback = true;
-                p.gu_max = std::max(p.gu_max, mmq::matrix_bytes(gt, 1280, N));
-                p.d_max = std::max(p.d_max, mmq::matrix_bytes(dt, N, 640));
-                continue;
-            }
             // a tile on every GPU for these shapes (gate+up: 1280 rows, down: N rows), else the FP16 path
             if (!mmq::fits(gt, 1280) || !mmq::fits(dt, N)) {
                 // Q6_K experts never take the FP16 path: a build without their MMQ instance refuses the pack
@@ -150,7 +139,7 @@ const MmqPlan& mmq_plan() {
 bool mmq_layer(int64_t l) {
     const MmqPlan& p = mmq_plan();
     if (!p.any || l < 0 || l >= (int64_t) p.layer.size()) return false;
-    return p.layer[(size_t) l] == 1 || (p.layer[(size_t) l] == 2 && moe_v70::enabled());
+    return p.layer[(size_t) l] != 0;
 }
 float* grp_scales(uint8_t* grp_d) { return (float*) (grp_d + MMQ_GROUP * mmq_plan().d_max + MMQ_TAIL); }
 // A layout whose chunks run the fused experts (a streamed chunk of stream_all_min() tokens or more).  Its GU, H and Xq hold only the fused path's grouping tables, int8 H and per-token

@@ -1,5 +1,5 @@
 // prefill_mmq_kq_test - llama.cpp's MMQ for the K-quant expert formats (gate/up Q4_K, Q5_K or Q6_K, down Q5_1 or Q8_0: the
-// UD-Q4_K_XL pack's layers) on random native expert blobs at the model's geometry (2560 x 640), against
+// UD-Q4_K_XL pack's layers) and Q5_0 down (gate/up IQ3_XXS or IQ4_XS: the UD-IQ4_XS pack's layers) on random native expert blobs at the model's geometry (2560 x 640), against
 //   - a double-precision reference: the weights dequantized by ggml's own to_float, times the FP32 activations, and
 //   - the path these formats took before: each expert dequantized to FP16 (iq_dequant_gu_f16 / iq_dequant_f16), FP16
 //     activations, two cuBLAS products and the FP16 SwiGLU, as expert_mmq.cpp runs it.
@@ -548,7 +548,9 @@ int main(int argc, char** argv) {
         const Pair pairs[] = {{GGML_TYPE_Q4_K, GGML_TYPE_Q5_1, "Q4_K / Q5_1"},
                               {GGML_TYPE_Q4_K, GGML_TYPE_Q8_0, "Q4_K / Q8_0"},
                               {GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, "Q5_K / Q8_0"},
-                              {GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, "Q6_K / Q8_0"}};
+                              {GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, "Q6_K / Q8_0"},
+                              {GGML_TYPE_IQ3_XXS, GGML_TYPE_Q5_0, "IQ3_XXS / Q5_0"},
+                              {GGML_TYPE_IQ4_XS, GGML_TYPE_Q5_0, "IQ4_XS / Q5_0"}};
         for (const Pair& p : pairs)
             if (!mmq::fits((int) p.gu, 1280) || !mmq::fits((int) p.d, N))
                 throw std::runtime_error(std::string(p.name) + ": MMQ does not take this pair");
