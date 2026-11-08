@@ -1238,16 +1238,21 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_v70_kernel(const float* _
         }
 }
 
+#include "qsa_prompt_attn_v70k8v4.cuh"
+
 template <int KV_MODE>
 bool launch70(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
               const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st) {
     static std::atomic<bool> attr[64];   // per device
     int dev = 0;
     cudaGetDevice(&dev);
-    const int bytes = (int) sizeof(Smem70<KV_MODE>);
+    // K8V4: the occupancy kernel (qsa_prompt_attn_v70k8v4.cuh); the other modes the general one
+    constexpr bool k8v4 = KV_MODE == 3;
+    auto* const kern = k8v4 ? v70k8v4::attn70_k8v4 : prompt_attn_v70_kernel<KV_MODE>;
+    const int bytes = k8v4 ? (int) sizeof(v70k8v4::Smem3) : (int) sizeof(Smem70<KV_MODE>);
     if (dev < 0 || dev >= 64) return false;
     if (!attr[dev].load(std::memory_order_acquire)) {
-        if (basalt::kernels::cc_func_set_attribute(prompt_attn_v70_kernel<KV_MODE>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
+        if (basalt::kernels::cc_func_set_attribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
             cudaSuccess) {
             cudaGetLastError();
             return false;
@@ -1257,7 +1262,7 @@ bool launch70(const float* q, const QsaAttnPools& pools, const int32_t* ids, con
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     for (int64_t q0 = 0; q0 < n_q; q0 += 65535) {
         const int64_t nb = n_q - q0 < 65535 ? n_q - q0 : 65535;
-        basalt::kernels::launch_cc(prompt_attn_v70_kernel<KV_MODE>, dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st, q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
+        basalt::kernels::launch_cc(kern, dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st, q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
             (int) s.page_size, scale_log2, attn + q0 * s.n_head * HD, (int) cap);
     }
     const cudaError_t e = cudaGetLastError();
