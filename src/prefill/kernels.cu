@@ -686,6 +686,7 @@ bool gr_up_mix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const
     if (!al(lo16, 16) || !al(w_up, 16) || !al(R, 8) || !al(rs, 16) || !al(w_norm, 8) || !al(mixed, 8) ||
         !al(mixed16, 4) || !al(mixed_h, 4) || !al(mixed16_lo, 4))
         return false;
+    if (basalt::kernels::sm70_current()) return false;   // no bf16 mma: the GEMM and gr_mix_r instead
     if (T <= 0) return true;
     const dim3 grid(N / UM_BD, (unsigned) ((T + UM_BM - 1) / UM_BM));
     basalt::kernels::launch_cc(gr_up_mix_kernel, grid, 256, UM_SMEM, (cudaStream_t) stream, lo16, w_up, R, rs, w_norm, mixed, mixed16, mixed_h,
