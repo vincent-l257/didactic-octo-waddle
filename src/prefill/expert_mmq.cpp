@@ -18,7 +18,8 @@ void Prefill::Run::Chunk::Experts::Group::prepare_products() {
     pf_tick((cudaStream_t) m.cs, "x.pre");
     if (use_mmq) {
         // the layer's activations as q8_1 rows in expert order, straight from `mixed`
-        if (!fp4_l) mmq::quantize(m.mixed, m.src_dev, m.Xq, mmq_gt, N, N, T * K, m.cs);
+        if (v70_l) gather_rows16(m.mixed_h, m.src_dev, (uint16_t*) m.GU, T * K, N, m.cs);   // f16 rows, in GU
+        else if (!fp4_l) mmq::quantize(m.mixed, m.src_dev, m.Xq, mmq_gt, N, N, T * K, m.cs);
         // each group's rows: absolute bounds (gate/up reads the layer's rows), relative ones (down
         // reads the group's own quantized H)
         const size_t n = order.size(), ng = (n + MMQ_GROUP - 1) / MMQ_GROUP;
@@ -29,6 +30,27 @@ void Prefill::Run::Chunk::Experts::Group::prepare_products() {
             for (size_t i = 0; i <= MMQ_GROUP; ++i)
                 m.bounds_host[n + 1 + g * (MMQ_GROUP + 1) + i] =
                     m.bounds_host[std::min(n, g * MMQ_GROUP + i)] - m.bounds_host[g * MMQ_GROUP];
+        if (v70_l) {   // every group's jobs: its experts' rows in runs of at most kJobRows
+            v70_jobs.clear();
+            v70_goff.assign(ng + 1, 0);
+            for (size_t g = 0; g < ng; ++g) {
+                for (size_t i = 0; i < MMQ_GROUP && g * MMQ_GROUP + i < n; ++i) {
+                    const int32_t e = order[g * MMQ_GROUP + i];
+                    const int r = (int) m.off[(size_t) e], c = (int) m.cnt[(size_t) e];
+                    for (int k = 0; k < c; k += moe_v70::kJobRows)
+                        v70_jobs.push_back({(int) i, r + k, std::min(moe_v70::kJobRows, c - k)});
+                }
+                v70_goff[g + 1] = (int) v70_jobs.size();
+            }
+            v70_dev = moe_v70::job_buffer(std::max<size_t>(v70_jobs.size(), 1));
+            if (v70_dev == nullptr) {
+                basalt::log::error("basalt", "prefill: the f16 expert jobs' buffer failed");
+                std::exit(1);
+            }
+            if (!v70_jobs.empty())
+                cudaMemcpyAsync(v70_dev, v70_jobs.data(), v70_jobs.size() * sizeof(moe_v70::Job),
+                                cudaMemcpyHostToDevice, m.cs);
+        }
         if (grp_mapped) {
             int32_t* bh = m.grp_host + 3 * m.grp_tk;
             std::memcpy(bh, m.bounds_host.data(), m.bounds_host.size() * 4);
@@ -105,6 +127,14 @@ bool Prefill::Run::Chunk::Experts::Group::compute_mmq(size_t j, const uint8_t* b
     // the zeroed tail after the group's last expert (see MMQ_TAIL)
     cudaMemsetAsync(m.grp_gu + (size_t) ngx * mmq_gub, 0, MMQ_TAIL, m.cs);
     cudaMemsetAsync(m.grp_d + (size_t) ngx * mmq_db, 0, MMQ_TAIL, m.cs);
+    if (v70_l) {   // the group's products on f16 tensor cores: H as f16 in H, down into Dm
+        const int a = v70_goff[g], b = v70_goff[g + 1];
+        moe_v70::gu_swiglu(v70_dev + a, b - a, m.grp_gu, mmq_gub, 1280, N, (const uint16_t*) m.GU, (uint16_t*) m.H, m.cs);
+        pf_tick((cudaStream_t) m.cs, "x.gu");
+        moe_v70::down(v70_dev + a, b - a, m.grp_d, mmq_db, N, 640, (const uint16_t*) m.H, m.Dm, m.cs);
+        pf_tick((cudaStream_t) m.cs, "x.down");
+        return true;
+    }
     mmq::Product gu;
     gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
     gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;

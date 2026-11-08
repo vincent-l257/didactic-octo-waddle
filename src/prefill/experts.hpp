@@ -12,6 +12,7 @@
 #include "basalt/prefill/moe_fused_iq.hpp"
 #include "basalt/prefill/moe_mmq.hpp"
 #include "basalt/prefill/moe_fp4.hpp"
+#include "basalt/prefill/moe_v70.hpp"
 #include "basalt/core/peer_experts.hpp"
 #include <vector>
 #include <future>
@@ -99,6 +100,9 @@ struct Prefill::Run::Chunk::Experts {
                        lay.fmt[(size_t) l].tail != 0 && T >= FP4_MIN_TOKENS;
     const bool fused_nat = use_mmq && stream_all && lay.native && fused::native_supported(mmq_gt, mmq_dt);
     const bool fused_l = (use_mmq && stream_all && !lay.native && fused::enabled()) || fused_nat;
+    // compute capability 7.0: the MMQ groups' products on f16 tensor cores (moe_v70.hpp) where it takes the types
+    const bool v70_l = use_mmq && !fp4_l && !fused_l && lay.native && lay.fmt[(size_t) l].tail == 0 &&
+                       moe_v70::usable(mmq_gt, mmq_dt) && moe_v70::enabled();
     bool peer_now = false;                // multi-GPU: the peer computed rows of this layer (MMQ path only)
     // CPU share: this layer's CPU experts (rows [T * K - rows_cpu, T * K) of Dm) run on a thread that
     // reads on_cpu, so the future (which waits for the thread) is declared after it
@@ -192,6 +196,7 @@ struct Prefill::Run::Chunk::Experts::Group {
     decltype(Experts::fp4_l)& fp4_l = experts.fp4_l;
     decltype(Experts::fused_nat)& fused_nat = experts.fused_nat;
     decltype(Experts::fused_l)& fused_l = experts.fused_l;
+    decltype(Experts::v70_l)& v70_l = experts.v70_l;
     decltype(Experts::peer_now)& peer_now = experts.peer_now;
     decltype(Experts::on_cpu)& on_cpu = experts.on_cpu;
     decltype(Experts::cpu_ms)& cpu_ms = experts.cpu_ms;
@@ -214,6 +219,10 @@ struct Prefill::Run::Chunk::Experts::Group {
     const size_t mmq_db = use_mmq ? mmq::matrix_bytes(mmq_dt, N, 640) : 0;
     int stage_next = 0;
     std::vector<int> stage_of, job_of;
+    // v70_l: every group's jobs, in group order (v70_goff[g] .. v70_goff[g + 1]), on the device at v70_dev
+    std::vector<moe_v70::Job> v70_jobs;
+    std::vector<int> v70_goff;
+    moe_v70::Job* v70_dev = nullptr;
     Chunk::StagerDone stager_done{nullptr};
     // In the streamed walk an MMQ group is gathered in ONE launch, after ONE wait on its last
     // streamed copy (the copy stream is in order), and its ring slots are released by ONE event.  A
