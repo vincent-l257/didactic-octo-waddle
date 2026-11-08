@@ -74,7 +74,16 @@ Drafter-row report over x1: 2.24 s.
     x.act 796 (swiglu + H quantize) x.pre 157 x.quant 65 ms. Others: qsa.attn 1109 gdn.rec 778 gdn.proj 578 hc 606
     between 1415. Next targets: IQ3_S load_tiles on sm_70, the resident-expert gather (copies every expert into
     group slots each chunk: ~14 ms per layer-chunk vs ~2.4 ms of bandwidth), gdn_chunked (emulated bf16 mma).
-3. Quality: PPL/KLD of the V100 changes (WMMA FP16 GEMM, hc up-mix, m8n8k4 attention) - not run yet.
+3. Quality: PPL/KLD of the V100 changes (WMMA FP16 GEMM, hc up-mix, m8n8k4 attention) - not run yet. Blocked:
+   no BF16 .kld base (llama-perplexity --kl-divergence-base from the BF16 GGUF) and no wiki.test.raw on this
+   machine (docs/precision/quality.md).
+
+Loop stopped (2026-11-07): the rest are each <= ~5% of the V100's 9.5 s.
+- x.gather is mostly profiler syncs (~1900 ticks); the real copy is ~3 ms per layer-chunk (~0.2-0.3 s total).
+- iq3s_grid is __device__ (global, L1-cached), not constant memory: not the tile-loader cost.
+- gdn: Strata's V100 path (src/prefill/gdn_chunk.cu: cumsum/kkt/wmma kernels) has a different structure from
+  Basalt's gdn_chunked.cu; a port is a rewrite for <= ~0.5 s. Strata also has src/split/src/moe_mma.cuh
+  (m8n8k4 expert products, 64-row jobs) - a reference if the expert tile loader gets reworked.
 (old) Experts on the V100 at ~17 TOPS of dp4a (~60% of peak): next step is int8 -> fp16 in registers and m8n8k4 HMMA
    (exact: per-32 integer sums < 2^24), several times the dp4a rate.
 3. gdn_chunked on WMMA/FP16.
