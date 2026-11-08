@@ -55,6 +55,40 @@ The head is 0.83 ms: not the problem. The V100 is ~2x the 3090 per layer at simi
 the memory-bound kernels (hc reads, gemv, expert hits). If it matched the 3090 per layer (~6.8 ms), verify would
 drop ~6 ms (estimate, not measured). Next: find why fused_gr / native_mmvq / expert hits run ~2x on sm_70.
 
+## Deep dive (2026-11-08): sFNX (github.com/johnfink8/sfnx, V100-native, same model) + per-kernel benches
+Tools: nsys hangs the engine on this box (serve and --serve stdin alike): don't use it. Per-kernel truth comes from
+standalone benches in `<scratchpad>/gt/` (kernels copied from src, built by `bh.bat <name>` with CUDA 12.8 for
+sm_70/86/120). Engine-alone driver: `<scratchpad>/eng.sh` (GEN/GENT on stdin, QUIT after DONE).
+Measured: graph node gap V100 2.2 us vs 5070 Ti 0.8 us (~50-90 us/layer of the V100's 640). V100 decode clocks
+1380 MHz (its max), 97 W; 3090 ~1770 MHz. Dead ends: fused_gr plain/split/staged variants (decode runs hc8_gr, the
+variants are dead code on 3090/V100); native_mmvq upstream layout (no faster: 1.25 vs 1.18 ms).
+hc8 read at T=3, us (V100 / 3090): norm 4.9/3.6, down 34.7/17.1, up 19.1/15.7.
+- **Done:** hc8_down with coalesced 4-column lanes (256 threads): V100 down 34.7 -> 21.4 us, 3090 neutral; hc8_parity
+  ok (T-bitwise). Decode 90.1 -> 92.1 tok/s (IQ3_S 10,28, 262k, 18k prompt). Numerics: summation order only.
+- Tried, dropped: norm folded into down (registers, slower); up with 16-byte loads (slower at T>=3).
+Ranked queue (agent estimates, unmeasured unless noted):
+Decode (per window; V100 stage 12.8 ms of 22.9 verify):
+1. Dense GEMV for sm_70 in sFNX's q8s shape (warp per 1-4 rows, 16 B loads, T-templated, q|k|v segments in one
+   launch): dense_tc.cu is excluded from sm70 cubins, so V100 runs native_mmvq exact (one row per 128-thread CTA)
+   for qkv 1.18 + QSA q 0.45 + out-proj 0.68 ms. ~0.8-1.1 ms.
+2. Shared expert folded into the glue gate/up and down launches (~6 launches/layer): ~0.5 ms.
+3. Head proxy scoring dp4a-native on sm_70 (q6k_head.cu emulates mma_s8_16832 with shuffles): ~0.25-0.4 ms.
+4. Router GEMV + top-10 + route in one launch (last-block pattern): ~0.15-0.2 ms.
+5. One GDN rec launch on sm_70 (atomic per-head counter for the norm, z merged into qkv): ~0.15-0.25 ms.
+6. QSA: fewer projection launches; top-k histogram atomics aggregated with __match_any_sync: ~0.25 ms.
+7. Single-launch hc read (sFNX k_hc: grid = SMs, grid barriers): up to ~1.5 ms more; high effort.
+Drafts: A/B fixed T=8 vs the cum_adapt cutoff (avg T 2.9 here; stages barely depend on T): +5-15% prose, low effort.
+Prompt (V100 ~9.5 s busy per 18k):
+1. Expert products as fp16-dequant m8n8k4 HMMA (sFNX moe_mma.cuh: weights to fp16 in smem with the scale folded,
+   fp16 activations, 64x64x64 tiles, one launch per layer over a job list, no gather): ~1.4-1.8 s. IQ3_S blocks are
+   2-byte aligned: repack planes for 16 B loads. Then swiglu in the gate/up epilogue (fp16 H): ~0.7 s more.
+2. GDN chunked recurrence as FP32 SIMT (sFNX gdn_prompt.cuh; no tensor cores): gdn_chunked.cu emulates bf16/tf32
+   mma with shuffles on sm_70. ~0.45-0.55 s of gdn.rec 0.78 s.
+3. WMMA GEMM tuning (double buffer, BK=64, skinny tiles, merged alpha|beta): ~0.35-0.5 s.
+4. QSA prompt attention with single f16 q/p (drop hi/lo): up to ~0.2-0.4 s, numerics risk.
+5. QSA scorer on WMMA f16 hi/lo: ~0.06-0.09 s.
+Not portable: sFNX's tensor-parallel split (needs P2P at 5-8 GB/s; the V100 is on Gen2 x1, Windows).
+
 ## IQ4_XS on three cards (same build, 18k prompt, 32k context, one run each)
 | setup | prompt tok/s | decode tok/s | V100 busy |
 |---|---|---|---|
