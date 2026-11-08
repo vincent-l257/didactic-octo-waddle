@@ -176,6 +176,26 @@ Drafter-row report over x1: 2.24 s.
 - qsa_dec_attn.cu, q6k_head.cu (decode side)
 - moe: dp4a now; remaining cost is routing/gathers/quantize? to split
 
+## Split sweep at 199k (IQ3_S, 262k, `huge190`, attention build, one run each)
+
+Each card's prompt path lends a fixed 3.02 GiB of expert cache (8192-token chunk) unless it has that much free;
+the lent experts stream from RAM every chunk, whatever the layer count. Full-attention layers are l % 4 == 3.
+
+| Split | 5070 Ti / 3090 / V100 layers (attn) | Loans | Prompt | Decode | Stage busy s (0/1/2) |
+|---|---|---|---|---|---|
+| 10,28 | 10 (2) / 18 (5) / 20 (5) | 5070 Ti, 3090 | 2499 | 93.9 | 72.9 / 76.0 / 76.1 |
+| 11,29 | 11 (2) / 18 (5) / 19 (5) | 5070 Ti, 3090 | 2528 | 88.1 | 72.0 / 74.5 / 74.8 |
+| 12,28 | 12 (3) / 16 (4) / 20 (5) | 5070 Ti only | 2419 | 84.2 | 74.9 / 78.2 / 78.6 |
+| 9,28 | 9 (2) / 19 (5) / 20 (5) | 5070 Ti, 3090 | 2283 | 91.9 | 78.3 / 82.2 / 83.1 |
+| 10,26 | 10 (2) / 16 (4) / 22 (6) | 5070 Ti only | 1934 | 85.8 | 92.5 / 98.6 / 99.5 |
+
+- Stage busy includes waiting (an upstream stage waits for its successor's previous chunk; the V100's time moved
+  with upstream splits on the same 20 layers), so busy does not name the bottleneck.
+- Moving the 3090's loan to the 5070 Ti (12,28) or ending it via the V100 (10,26) does not help: the streamed
+  experts are not what bounds the 3090. 10,28 and 11,29 stay best; the next gains are per-layer speed on all
+  three cards, the attention layers at long context first.
+- `serve3_split.bat` uses `%~1`: cmd splits an unquoted `10,28` at the comma. Per-split launchers `serve3_sXXYY.bat`.
+
 ## Ideas queue
 1. (done) qsa split; attention ported.
 1b. (done) rebalanced: 8,28 best for prompts. Retry 8,27 / 9,28 once things shift again.
