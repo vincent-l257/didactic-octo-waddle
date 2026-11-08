@@ -8,6 +8,7 @@
 
 #include <cuda.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
@@ -84,6 +85,34 @@ void bind(int dev) {
     }
 }
 
+// Load every cubin in the directory into the current context: its modules join d.mods, its kernels go into `names`
+// (a kernel two cubins share, an inline template, resolves to the first file's copy).  Returns the files loaded.
+int load_dir(Device& d, std::unordered_map<std::string, CUfunction>& names) {
+    const std::filesystem::path dir = cubin_dir();
+    std::error_code ec;
+    int files = 0;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        const std::string name = e.path().filename().string();
+        if (!e.is_regular_file() || name.size() < 12 || name.compare(name.size() - 12, 12, ".sm_70.cubin") != 0) continue;
+        CUmodule m = nullptr;
+        if (const CUresult r = cuModuleLoad(&m, e.path().string().c_str()); r != CUDA_SUCCESS) {
+            basalt::log::warn("basalt sm70", "cuModuleLoad %s failed", name.c_str());
+            continue;
+        }
+        d.mods.push_back(m);
+        ++files;
+        unsigned n = 0;
+        if (cuModuleGetFunctionCount(&n, m) != CUDA_SUCCESS || n == 0) continue;
+        std::vector<CUfunction> fns(n);
+        if (cuModuleEnumerateFunctions(fns.data(), n, m) != CUDA_SUCCESS) continue;
+        for (CUfunction f : fns) {
+            const char* fname = nullptr;
+            if (cuFuncGetName(&fname, f) == CUDA_SUCCESS && fname != nullptr) names.emplace(norm_name(fname), f);
+        }
+    }
+    return files;
+}
+
 void load(int dev) {
     Device& d = g_dev[dev];
     std::call_once(d.loaded, [&] {
@@ -92,35 +121,13 @@ void load(int dev) {
         if (const CUresult r = cuDeviceGet(&cd, dev); r != CUDA_SUCCESS) die("cuDeviceGet", r);
         if (const CUresult r = cuDevicePrimaryCtxRetain(&d.ctx, cd); r != CUDA_SUCCESS) die("cuDevicePrimaryCtxRetain", r);
         bind(dev);
-        const std::filesystem::path dir = cubin_dir();
-        std::error_code ec;
-        int files = 0;
-        for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
-            const std::string name = e.path().filename().string();
-            if (!e.is_regular_file() || name.size() < 12 || name.compare(name.size() - 12, 12, ".sm_70.cubin") != 0) continue;
-            CUmodule m = nullptr;
-            if (const CUresult r = cuModuleLoad(&m, e.path().string().c_str()); r != CUDA_SUCCESS) {
-                basalt::log::warn("basalt sm70", "cuModuleLoad %s failed", name.c_str());
-                continue;
-            }
-            d.mods.push_back(m);
-            ++files;
-            unsigned n = 0;
-            if (cuModuleGetFunctionCount(&n, m) != CUDA_SUCCESS || n == 0) continue;
-            // a kernel two cubins share (an inline template) resolves to the first file's copy
-            std::vector<CUfunction> fns(n);
-            if (cuModuleEnumerateFunctions(fns.data(), n, m) != CUDA_SUCCESS) continue;
-            for (CUfunction f : fns) {
-                const char* fname = nullptr;
-                if (cuFuncGetName(&fname, f) == CUDA_SUCCESS && fname != nullptr) d.by_name.emplace(norm_name(fname), f);
-            }
-        }
+        const int files = load_dir(d, d.by_name);
         if (files == 0) {
-            basalt::log::error("basalt sm70", "no sm_70 cubins in %s", dir.string().c_str());
+            basalt::log::error("basalt sm70", "no sm_70 cubins in %s", cubin_dir().string().c_str());
             std::abort();
         }
         basalt::log::info("basalt sm70", "CUDA%d: %d cubins, %zu kernels from %s", dev, files, d.by_name.size(),
-                          dir.string().c_str());
+                          cubin_dir().string().c_str());
     });
     bind(dev);
 }
@@ -201,6 +208,39 @@ CUresult opt_in(int dev, CUfunction f, int bytes) {
 }
 
 }  // namespace
+
+void sm70_hot_reload() {
+    static const bool on = [] {
+        const char* e = std::getenv("BASALT_SM70_HOT");
+        return e != nullptr && *e != 0 && *e != '0';
+    }();
+    if (!on) return;
+    static std::filesystem::file_time_type seen{};
+    static bool have = false;
+    std::filesystem::file_time_type newest{};
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(cubin_dir(), ec))
+        if (e.is_regular_file()) newest = std::max(newest, e.last_write_time(ec));
+    if (!have) { seen = newest; have = true; return; }
+    if (newest <= seen) return;
+    seen = newest;
+    CUcontext prev = nullptr;
+    cuCtxGetCurrent(&prev);
+    for (int dev = 0; dev < kMaxDev; ++dev) {
+        Device& d = g_dev[dev];
+        if (d.ctx == nullptr) continue;
+        std::lock_guard<std::mutex> lk(d.mu);
+        if (cuCtxSetCurrent(d.ctx) != CUDA_SUCCESS) continue;
+        // the old modules stay loaded: graphs captured from them keep running their code
+        std::unordered_map<std::string, CUfunction> names;
+        const int files = load_dir(d, names);
+        if (files == 0) continue;
+        d.by_name.swap(names);
+        d.by_symbol.clear();
+        basalt::log::info("basalt sm70", "CUDA%d: reloaded %d cubins, %zu kernels", dev, files, d.by_name.size());
+    }
+    cuCtxSetCurrent(prev);
+}
 
 bool sm70_current() noexcept {
     static std::atomic<signed char> known[kMaxDev] = {};

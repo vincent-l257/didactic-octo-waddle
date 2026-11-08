@@ -1,4 +1,5 @@
 // src/program/serve/commands.cpp - scheduling and protocol command dispatch.
+#include "basalt/kernels/cc_launch.hpp"
 #include "request.hpp"
 
 namespace basalt::program::serve {
@@ -47,6 +48,7 @@ Flow Runtime::dispatch() {
         }
         if (!got && !next_line(line)) return Flow::quit;
     }
+    basalt::kernels::sm70_hot_reload();   // BASALT_SM70_HOT: rebuilt cubins, between requests
     // --batch: BSTOP <slot> ends that slot at its next batch window; BGEN <slot> <max_new> ... reads the
     // request's prompt and first token as a GEN 1, then continues it in that slot
     if (line.rfind("BSTOP ", 0) == 0) {

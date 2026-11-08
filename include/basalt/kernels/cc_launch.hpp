@@ -18,6 +18,9 @@ namespace basalt::kernels {
 
 /// The current device has compute capability 7.0 (cached per device).
 bool sm70_current() noexcept;
+/// With BASALT_SM70_HOT=1: when the sm_70 cubins have changed on disk since the last call, load them again (new
+/// launches use the new code; captured graphs keep the old).  Call between requests.
+void sm70_hot_reload();
 
 /// Launch `fn`'s sm_70 image on the current device. `args` points at each parameter in the kernel's own types.
 cudaError_t sm70_launch(const void* fn, dim3 grid, dim3 block, size_t smem, cudaStream_t stream, void** args,
