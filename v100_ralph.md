@@ -102,6 +102,14 @@ hc8 read at T=3, us (V100 / 3090): norm 4.9/3.6, down 34.7/17.1, up 19.1/15.7.
   gdn.qkv 11.4 -> 5.9 ms, qsa.q 14.1 -> 7.2, gdn.out 4.6 -> 3.3, hc.down 1.8 -> 1.1, hc.up 1.6 -> 1.2; bitwise the
   old kernel on every tensor-core shape; inject (N=4) now exact in FP32 (numerics change). End to end: 18k prompt
   1672 -> 1733 tok/s, decode 105.7, V100 busy 7.22 -> 6.76 s; 199k prompt 2085 -> 2213 tok/s, decode 94.4.
+- **Done:** QSA prompt attention for K8V4 on cc 7.0 (src/kernels/cuda/qsa_prompt_attn_v70k8v4.cuh, from
+  `<scratchpad>/gt/attn70/`; launch70<3> picks it). The old kernel was latency-bound (55.8 KB smem, 1 block/SM;
+  skipping its mma saved nothing). The new one: V raw q4_0 in smem, K fragments from the pool one chunk ahead, no
+  zero rows, exact 4-bit codes split hi+lo, 22.8 KB smem, 3 blocks/SM. Standalone 105.5 -> 24.8 ms per 8192-token
+  chunk per QSA layer; error vs fp64 1.6e-4 -> 3.7e-7 (numerics change). Multi-query union blocks: not worth it (L2
+  absorbs the shared gathers). End to end: 18k 1733 -> 1898 tok/s, decode 102.8, V100 busy 6.76 -> 5.93 s; 199k
+  2213 -> 2499 tok/s, decode 93.9.
+- **Done:** `--debug-layers N` (v100_howto.md): 12 layers load in ~47 s instead of ~2 min 15 s.
 - **Done:** sm_70 cubin hot reload (BASALT_SM70_HOT=1): the engine reloads changed cubins between requests, so a
   V100 kernel change needs `--target sm70_cubins` and the next request, not a restart (see v100_howto.md).
 - Two cards (5070 Ti + 3090, 262k): 1301 / 68.0 on Windows (bin\basalt.exe, earlier). Same build as three cards
