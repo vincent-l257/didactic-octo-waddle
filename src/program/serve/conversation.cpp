@@ -1,5 +1,6 @@
 // src/program/serve/conversation.cpp - conversation operations for the persistent engine.
 #include "state.hpp"
+#include "async_report.hpp"
 #include "basalt/core/kv_arena.hpp"
 
 namespace basalt::program::serve {
@@ -655,7 +656,12 @@ int Runtime::init_conversations() {
         return true;
     };
     if (multi_gpu) {   // the batched prompt is reported by its last stage (the drafter's rows are there)
-        stages.back()->sp.on_chunk = std::move(sp.on_chunk);
+        // the drafter's rows cross to CUDA0 while the last stage reads its next chunk
+        auto rep = std::make_shared<AsyncReport>(std::move(sp.on_chunk), stages.back()->dev, g.hc * g.n_embd);
+        stages.back()->sp.on_chunk = [rep](const float* R, int64_t T, int64_t p0, std::string& e) {
+            return rep->chunk(R, T, p0, e);
+        };
+        stages.back()->sp.on_drain = [rep](std::string& e) { return rep->drain(e); };
         sp.on_chunk = nullptr;
         for (size_t i = 0; i <= stages.size(); ++i) {
             basalt::prefill::Prefill& stage_sp = i == 0 ? sp : stages[i - 1]->sp;

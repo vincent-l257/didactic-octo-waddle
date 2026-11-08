@@ -39,6 +39,8 @@ struct PrefillStats {
     int64_t experts_cpu = 0;        ///< experts computed on the CPU pool instead of streamed
     double cpu_share = 0;           ///< the share of the streamed experts the CPU took last
     double ms_ple = 0;
+    double ms_hand = 0;             ///< handing chunks to the next stage (device -> host)
+    double ms_report = 0;           ///< on_chunk: the draft layer's rows and the caller's report
 };
 
 }  // namespace basalt::prefill
@@ -167,6 +169,8 @@ public:
     /// T x hc*n_embd, valid until the next chunk) and the chunk's first position; the MTP draft layer builds its
     /// K/V from them.  The prefill stream is synchronized before the call.
     std::function<bool(const float* R_rows, int64_t T, int64_t pos0, std::string& err)> on_chunk;
+    /// at the end of every run, once the stages after this one are drained: finish what on_chunk left running
+    std::function<bool(std::string& err)> on_drain;
 
     /// Called on the host before each layer of a chunk with the layers done so far, the layer count, the chunk's
     /// length and first position.  No device work is added; the MoE layers' routing readback keeps the host in step

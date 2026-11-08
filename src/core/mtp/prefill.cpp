@@ -71,7 +71,7 @@ bool MtpDrafter::prefill_cur(const float* R_rows, const int32_t* next_tokens, in
                     blk0 = c;
                     const int64_t nb = std::min<int64_t>(kRelayRows, n - c);
                     if (cudaMemcpyAsync(relay_, R_rows + (size_t) c * HCN, (size_t) nb * HCN * sizeof(float),
-                                        cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
+                                        cudaMemcpyDefault, cs_) != cudaSuccess) {
                         err = "mtp prefill: relaying the rows failed";
                         return false;
                     }

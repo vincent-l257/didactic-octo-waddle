@@ -47,7 +47,13 @@ bool Prefill::drain_pipeline(std::string& err) {
             ok = false;
         }
     }
-
+    if (on_drain) {
+        std::string de;
+        if (!on_drain(de)) {
+            if (ok) err = de;
+            ok = false;
+        }
+    }
     return ok;
 }
 

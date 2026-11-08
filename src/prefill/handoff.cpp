@@ -4,6 +4,7 @@
 #include "basalt/core/progress.hpp"
 #include "basalt/core/peer_experts.hpp"
 #include <string>
+#include <chrono>
 #include <future>
 
 namespace basalt::prefill {
@@ -28,11 +29,13 @@ int Prefill::Run::Chunk::finish() {
         }
         // The current hand-off slot was used two chunks ago.
         float* h = m.hand[owner.hand_buf_];
+        const auto th = std::chrono::steady_clock::now();
         if (cudaMemcpyAsync(h, m.R, (size_t) T * D * 4, cudaMemcpyDeviceToHost, m.cs) != cudaSuccess ||
             cudaStreamSynchronize(m.cs) != cudaSuccess) {
             err = std::string("prefill: the layer split's hand-off: ") + cudaGetErrorString(cudaGetLastError());
             return -1;
         }
+        owner.stats_.ms_hand += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - th).count();
         // Wait only for the DIRECT successor's previous chunk. That successor
         // may already have forwarded its older chunk to later GPUs.
         if (owner.on_stage_chunk && !owner.on_stage_chunk(p0 + T, err)) return -1;
@@ -52,7 +55,9 @@ int Prefill::Run::Chunk::finish() {
             return -1;
         }
         if (owner.on_stage_chunk && !owner.on_stage_chunk(p0 + T, err)) return -1;
+        const auto tr = std::chrono::steady_clock::now();
         if (owner.on_chunk && !owner.on_chunk(m.R, T, p0, err)) return -1;
+        owner.stats_.ms_report += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tr).count();
     }
     return 0;
 }
