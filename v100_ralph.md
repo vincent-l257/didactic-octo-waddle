@@ -45,6 +45,16 @@ copied into every later launcher). basalt_config.json sets 262144; launchers now
 Both keep the V100's own prompt buffers (no loan) at 262k. IQ3_S: 100% of experts in VRAM; IQ4_XS: 92%.
 Long prompt: `<scratchpad>/huge.json` (docs + src, 125,278 tokens); `PROMPT=huge measure.sh <tag> <log>`.
 
+## Decode profile (IQ3_S 10,28, 262k, 18k prompt, 400 out; `--profile`, every stage now reported)
+verify 22.87 ms/window (2.30 tokens), draft 2.43. GPU ms/window per stage, run one after another:
+- CUDA0 (5070 Ti, 10 layers): 2.86 (0.29/layer)
+- CUDA1 (3090, 18 layers): 6.15 (0.34/layer)
+- CUDA2 (V100, 20 layers): 12.80 (0.64/layer). Biggest parts: expert VRAM hits 2.96, hc-read1+router 2.12,
+  hc-read0 1.60, q8+qkv gemv 1.18 (+0.45 QSA q), shared+quant 0.91, head 0.83, out-proj 0.68, attention 0.47.
+The head is 0.83 ms: not the problem. The V100 is ~2x the 3090 per layer at similar memory bandwidth, across
+the memory-bound kernels (hc reads, gemv, expert hits). If it matched the 3090 per layer (~6.8 ms), verify would
+drop ~6 ms (estimate, not measured). Next: find why fused_gr / native_mmvq / expert hits run ~2x on sm_70.
+
 ## IQ4_XS on three cards (same build, 18k prompt, 32k context, one run each)
 | setup | prompt tok/s | decode tok/s | V100 busy |
 |---|---|---|---|
