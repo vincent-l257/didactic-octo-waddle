@@ -3,7 +3,7 @@
 #include "basalt/kernels/dequant_bf16.hpp"
 #include "basalt/kernels/hc_fused.hpp"
 #include "basalt/kernels/cc_launch.hpp"
-#include "gemm_wmma.cuh"
+#include "gemm_sm70.cuh"
 #include <cuda_bf16.h>
 
 #include <cublas_v2.h>
@@ -88,10 +88,11 @@ __global__ void __launch_bounds__(256) gemm_simt_kernel(const T* X, const T* W, 
 template <class T>
 void gemm_simt(const uint16_t* X, const uint16_t* W, float* Y, int64_t T_, int64_t N, int64_t K, int64_t ldy,
                float beta, void* stream) {
-    if (wmma_gemm::gemm_wmma_fits(X, W, K)) {   // the tensor cores when the shape allows
-        const dim3 g2((unsigned) ((N + 127) / 128), (unsigned) ((T_ + 127) / 128));
-        basalt::kernels::launch_cc(wmma_gemm::gemm_wmma_kernel<T>, g2, dim3(256), 0, (cudaStream_t) stream,
-                                   (const T*) X, (const T*) W, Y, (int) T_, (int) N, (int) K, (int) ldy, beta);
+    if (sm70_gemm::gemm_sm70_fits(X, W, K)) {   // the tensor cores when the shape allows
+        sm70_gemm::gemm_sm70((const T*) X, (const T*) W, Y, (int) T_, (int) N, (int) K, (int) ldy, beta,
+                             [&](auto fn, dim3 g, dim3 b, size_t smem, auto... a) {
+                                 basalt::kernels::launch_cc(fn, g, b, smem, (cudaStream_t) stream, a...);
+                             });
         return;
     }
     const dim3 grid((unsigned) ((N + 63) / 64), (unsigned) ((T_ + 63) / 64));
