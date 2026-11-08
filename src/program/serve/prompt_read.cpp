@@ -9,8 +9,28 @@ bool Request::read_part(int64_t a0, int64_t b0, std::string& e) {
         // no window runs meanwhile, so the CPU pool is free: it takes its share of the streamed experts
         const bool lend_pool = runtime_.o.batch > 0 && !runtime_.multi_gpu && !runtime_.o.no_pool;
         if (lend_pool) { runtime_.sp.set_cpu_pool(&runtime_.pool); runtime_.sp.set_cpu_share(runtime_.o.prefill_cpu_share); }
+        GpuStage* host = runtime_.stages.size() >= 2 ? runtime_.stages[runtime_.stages.size() - 2].get() : nullptr;
+        if (host != nullptr && host->prompt_dup) return read_dup(*host, a0, b0, e);
+        // each stage's busy time and streamed experts for this read
+        std::vector<basalt::prefill::PrefillStats> s0{runtime_.sp.stats()};
+        for (auto& st : runtime_.stages) s0.push_back(st->sp.stats());
+        const auto tr = Clock::now();
         const bool ok = runtime_.sp.run(ids.data() + a0, b0 - a0, a0, e);
         if (lend_pool) runtime_.sp.set_cpu_pool(nullptr);
+        if (ok && !runtime_.stages.empty() && b0 - a0 >= 1024) {
+            std::string parts;
+            for (size_t i = 0; i < s0.size(); ++i) {
+                const basalt::prefill::PrefillStats& s1 = i == 0 ? runtime_.sp.stats() : runtime_.stages[i - 1]->sp.stats();
+                char b[160];
+                std::snprintf(b, sizeof b, "%sCUDA%d %.0f ms busy (hand-off %.0f, report %.0f), %lld streamed",
+                              i ? "; " : "", i == 0 ? 0 : runtime_.stages[i - 1]->dev, s1.ms_total - s0[i].ms_total,
+                              s1.ms_hand - s0[i].ms_hand, s1.ms_report - s0[i].ms_report,
+                              (long long) (s1.experts_streamed - s0[i].experts_streamed));
+                parts += b;
+            }
+            basalt::log::info("basalt serve", "prompt stages: %lld tokens in %.0f ms; %s", (long long) (b0 - a0),
+                              std::chrono::duration<double, std::milli>(Clock::now() - tr).count(), parts.c_str());
+        }
         return ok;
     }
     if (runtime_.batch_on() && runtime_.stages.empty()) {
@@ -194,6 +214,55 @@ bool Request::read_part(int64_t a0, int64_t b0, std::string& e) {
         il_ms += std::chrono::duration<double, std::milli>(Clock::now() - td).count();
     }
     return true;
+}
+
+}  // namespace basalt::program::serve
+
+namespace basalt::program::serve {
+
+bool Request::read_dup(engine_local::GpuStage& host, int64_t a0, int64_t b0, std::string& e) {
+    engine_local::GpuStage& d = *host.prompt_dup;
+    engine_local::GpuStage& tail = *runtime_.stages.back();
+    const auto t0 = Clock::now();
+    // cross-device copies of the state go through the host
+    const basalt::core::DeviceCopy copy = [](void* dst, const void* src, uint64_t nb) {
+        return cudaMemcpy(dst, src, (size_t) nb, cudaMemcpyDefault) == cudaSuccess;
+    };
+    {
+        const basalt::core::OnDevice on(d.dev);
+        if (a0 == 0) {
+            basalt::core::session_zero(d.ss, runtime_.g, nullptr, (void*) d.stream);
+            if (cudaStreamSynchronize(d.stream) != cudaSuccess) {
+                e = "--prompt-dup: zeroing the copy's session failed";
+                return false;
+            }
+        } else if (!basalt::core::session_copy_state(d.ss, tail.ss, runtime_.g, d.lb, d.le, 0, a0, copy, e)) {
+            e = "--prompt-dup: the last stage's state to the copy: " + e;
+            return false;
+        }
+    }
+    const double ms_in = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    host.sp.set_stage(host.lb, host.le, &d.sp);
+    d.sp.on_chunk = std::move(tail.sp.on_chunk);
+    d.sp.on_drain = std::move(tail.sp.on_drain);
+    const auto tr = Clock::now();
+    bool ok = runtime_.sp.run(ids.data() + a0, b0 - a0, a0, e);
+    const double ms_run = std::chrono::duration<double, std::milli>(Clock::now() - tr).count();
+    tail.sp.on_chunk = std::move(d.sp.on_chunk);
+    d.sp.on_chunk = nullptr;
+    tail.sp.on_drain = std::move(d.sp.on_drain);
+    d.sp.on_drain = nullptr;
+    host.sp.set_stage(host.lb, host.le, &tail.sp);
+    const auto tb = Clock::now();
+    if (ok) {
+        const basalt::core::OnDevice on(tail.dev);
+        ok = basalt::core::session_copy_state(tail.ss, d.ss, runtime_.g, d.lb, d.le, a0, b0, copy, e);
+        if (!ok) e = "--prompt-dup: the copy's state to the last stage: " + e;
+    }
+    basalt::log::info("basalt serve", "--prompt-dup: %lld tokens, layers %lld-%lld on CUDA%d; state in %.0f ms, read "
+                      "%.0f ms, state out %.0f ms", (long long) (b0 - a0), (long long) d.lb, (long long) d.le - 1,
+                      d.dev, ms_in, ms_run, std::chrono::duration<double, std::milli>(Clock::now() - tb).count());
+    return ok;
 }
 
 }  // namespace basalt::program::serve

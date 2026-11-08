@@ -93,6 +93,9 @@ struct Options {
     int peer_adapt_swaps = -1;
     /// The peer's experts are held only on the peer, not also in the RAM complement (needs --resident-experts).
     bool peer_exclusive = false;
+    /// Layer split: the second-to-last stage also holds the last stage's dense weights and reads those layers of every
+    /// prompt; the last stage only decodes and gets the prompt's state copied in.
+    bool prompt_dup = false;
     /// the prompt path's rows per layer the peer computes: -1 = half of chunk x top-k, 0 = the prompt path stays on
     /// the primary
     int64_t peer_prefill_rows = -1;

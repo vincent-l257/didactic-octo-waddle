@@ -196,6 +196,9 @@ private:
     SplitPlan split_plan(int64_t a0, int64_t b0, const char* no_split);
     bool read_split(int64_t a0, int64_t b0, const SplitPlan& plan, bool& ran, std::string& e);
     bool read_part(int64_t a0, int64_t b0, std::string& e);
+    /// --prompt-dup: [a0, b0) through the stages with `host`'s copy of the last stage's layers in its place, then those
+    /// layers' state to the last stage
+    bool read_dup(engine_local::GpuStage& host, int64_t a0, int64_t b0, std::string& e);
     DecSnap dec_snap();
     Flow parse();
     Flow prepare_image();

@@ -156,6 +156,10 @@ std::optional<int> validate_generation_options(const Options& o, bool multi_gpu,
         basalt::log::error("basalt generate", "--peer-exclusive runs with one expert tier card (--gpu 0,1)");
         return 2;
     }
+    if (o.prompt_dup && (o.layer_split.empty() || !o.resident_cpu_experts)) {
+        basalt::log::error("basalt generate", "--prompt-dup needs a layer split (--layer-split) and --resident-experts");
+        return 2;
+    }
     // the peer tier is the second card's only user: a layer split would put a second engine part on it
     if (o.peer_device >= 1 && !o.layer_split.empty()) {
         basalt::log::error("basalt generate", "--peer-device cannot be combined with --layer-split (use one or the other)");

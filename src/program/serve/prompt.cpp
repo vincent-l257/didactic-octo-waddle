@@ -34,6 +34,16 @@ int Runtime::init_prompt_paths() {   // 0: ready; 1: failed (err set); 2: failed
             err = "layer split, CUDA" + std::to_string(st.dev) + " prompt path: " + err;
             return err.find("do not fit") != std::string::npos ? 2 : 1;
         }
+        // --prompt-dup: the last stage's layers on this card, every expert streamed, in its reserved buffers
+        if (st.prompt_dup) {
+            GpuStage& d = *st.prompt_dup;
+            d.sp.set_stage(d.lb, -1, nullptr);
+            if (!d.sp.init(d.wt, g, d.ss, srcp, &st.cache, d.stream_res.data(), o.prefill_chunk, (void*) d.stream,
+                           err, d.pf_buf, d.pf_bytes)) {
+                err = "--prompt-dup, CUDA" + std::to_string(d.dev) + " prompt path: " + err;
+                return err.find("do not fit") != std::string::npos ? 2 : 1;
+            }
+        }
     }
     if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);
     if (!multi_gpu && o.batch <= 0 && !o.no_pool) { sp.set_cpu_pool(&pool); sp.set_cpu_share(o.prefill_cpu_share); }   // the pool is idle while a prompt is read
@@ -466,6 +476,7 @@ int Runtime::init_prompt() {
             for (auto& stp : stages) {
                 const basalt::core::OnDevice on(stp->dev);
                 stp->sp.reset();
+                if (stp->prompt_dup) stp->prompt_dup->sp.reset();
                 (void) cudaGetLastError();
             }
             sp.reset();

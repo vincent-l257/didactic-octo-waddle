@@ -245,6 +245,56 @@ int sessions(Context& context) {
                              "%.2f GiB free", st.dev, (long long) st.lb, (long long) st.le,
                      last ? " and the head" : "", (double) fb / 1073741824.0);
     }
+    // --prompt-dup: the last stage's dense weights and a session for its layers on the stage before it, which reads
+    // those layers of every prompt; its prompt buffers are reserved here, before the expert caches take the VRAM
+    if (o.prompt_dup && stages.size() >= 2 && stage_trim) {
+        GpuStage& host = *stages[stages.size() - 2];
+        const GpuStage& tail = *stages.back();
+        host.prompt_dup = std::make_unique<GpuStage>();
+        GpuStage& d = *host.prompt_dup;
+        d.dev = host.dev;
+        d.lb = tail.lb;
+        d.le = tail.le;
+        const basalt::core::OnDevice on(d.dev);
+        std::set<std::string> skip_d = skip_base;
+        uint64_t pool_d = pool_bytes;
+        add_foreign(d.lb, d.le, skip_d);
+        basalt::core::NativeDense::set_layer_range((int) d.lb, (int) d.le);
+        void* arena_d = nullptr;
+        if (!basalt::core::WeightTable::pool_bytes(pack_files, pool_d, err, &skip_d) ||
+            cudaMalloc(&arena_d, pool_d) != cudaSuccess || !d.wt.load(pack_files, arena_d, pool_d, err, &skip_d) ||
+            !d.dense.load(o.native_shards, d.wt, err, true) || !basalt::core::Verifier::prepare_hc8(d.wt, g, err)) {
+            (void) cudaGetLastError();
+            basalt::log::error("basalt generate", "--prompt-dup, CUDA%d layers %lld-%lld: %s", d.dev, (long long) d.lb,
+                               (long long) d.le - 1, err.empty() ? "the weight arena does not fit" : err.c_str());
+            return 1;
+        }
+        void* sbuf_d = nullptr;
+        if (cudaStreamCreateWithFlags(&d.stream, cudaStreamNonBlocking) != cudaSuccess ||
+            cudaMalloc(&sbuf_d, basalt::core::session_bytes(g, o.max_context, K, d.lb, d.le)) != cudaSuccess ||
+            basalt::core::session_init(g, o.max_context, K, sbuf_d, d.ss, d.lb, d.le) == 0) {
+            (void) cudaGetLastError();
+            basalt::log::error("basalt generate", "--prompt-dup, CUDA%d: the session state failed", d.dev);
+            return 1;
+        }
+        d.stream_res.assign((size_t) (g.n_layers * g.n_expert), basalt::core::kNotResident);
+        const int64_t chunk = o.prefill_chunk > 0 ? o.prefill_chunk : 8192;
+        d.pf_bytes = basalt::prefill::Prefill::bytes_needed(g, d.ss, chunk);
+        if (cudaMalloc(&d.pf_buf, d.pf_bytes) != cudaSuccess) {
+            (void) cudaGetLastError();
+            basalt::log::error("basalt generate", "--prompt-dup, CUDA%d: %.2f GiB of prompt buffers for %lld-token "
+                               "chunks do not fit", d.dev, (double) d.pf_bytes / 1073741824.0, (long long) chunk);
+            return 1;
+        }
+        size_t fb = 0, tb = 0;
+        cudaMemGetInfo(&fb, &tb);
+        basalt::log::info("basalt generate", "--prompt-dup: CUDA%d also reads layers %lld-%lld of prompts (%.2f GiB "
+                          "weights, %.2f GiB prompt buffers); %.2f GiB free", d.dev, (long long) d.lb,
+                          (long long) d.le - 1, (double) pool_d / 1073741824.0, (double) d.pf_bytes / 1073741824.0,
+                          (double) fb / 1073741824.0);
+    } else if (o.prompt_dup) {
+        basalt::log::warn("basalt generate", "--prompt-dup is off: it needs a layer split over 3 or more GPUs");
+    }
 
     // --batch: every stage carves o.batch more sessions like its own (same layer range and context), one per
     // slot of the batch windows.  Before the expert cache is sized, so `--expert-cache auto` leaves them room.

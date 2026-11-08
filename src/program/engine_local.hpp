@@ -160,6 +160,13 @@ struct GpuStage {
     cudaEvent_t adapt_ev = nullptr;
     bool adapt_live = false;                             ///< swaps of this request are in flight on it
     int32_t* mrope = nullptr;                            ///< --vision: the image-position table on its device
+    /// --prompt-dup: on the second-to-last stage, a stage on the same device holding the last stage's layers that reads
+    /// them for prompts; its experts are all streamed (`stream_res` marks none resident) and its prompt buffers are
+    /// `pf_buf`, reserved before the expert caches are sized
+    std::unique_ptr<GpuStage> prompt_dup;
+    std::vector<int32_t> stream_res;
+    void* pf_buf = nullptr;
+    uint64_t pf_bytes = 0;
 };
 /// One stage of a prompt-time layer split over the expert tier cards: for a long prompt the main card reads layers
 /// [0, b1) of every chunk and hands the chunk on, each tier card's stage reads the next block of layers of it while the

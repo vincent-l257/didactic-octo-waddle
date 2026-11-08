@@ -85,7 +85,10 @@ int resident_load(Context& context) {
             }
         }
         std::vector<std::pair<int32_t, int32_t>> gpu_only = peer_only;
-        gpu_only.insert(gpu_only.end(), stage_held.begin(), stage_held.end());
+        // --prompt-dup: the last stage's experts stay in the RAM copy too, for the prompts the stage before reads
+        const int64_t dup_lb = stages.size() >= 2 && stages[stages.size() - 2]->prompt_dup ? stages.back()->lb : INT64_MAX;
+        for (const auto& pr : stage_held)
+            if (pr.first < dup_lb) gpu_only.push_back(pr);
         const auto& rank = stages.empty() ? profile : profile_all;
         bool resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, gpu_only, lend_from, resident_headroom,
                                                     o.resident_budget, &rank);
