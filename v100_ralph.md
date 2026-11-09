@@ -248,6 +248,12 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
   ~7% fewer experts streamed, but less copy overlap: no gain. Ring stays 256; the switch was not kept.
 - No Parsec stream, default reserve, ring 256: **1,854 / 92.6** (9.24 s; streamed 4,014 / 6,693).
 
+## Decode at 199k without Parsec (IQ4_XS 10,29, 262k, `--profile`, one run each)
+- 18k (`long400`): 84.2 tok/s, verify 23.81 ms/window (2.23 tokens). 199k (`huge190`): **80.0** (was 65.6 with
+  Parsec streaming), verify 25.03. Expert hits 99.3-99.8%, CPU experts ~0: RAM is not the cost.
+- Stages ms/window 18k -> 199k: 5070 Ti 3.99 -> 4.13, 3090 7.29 -> 7.79, V100 11.69 -> 12.46; GPU-reach wait 2.80 -> 3.56.
+  Only QSA scores+topk grows with context (0.03/0.18/0.28 -> 0.13/0.76/1.08). The V100 is half of verify.
+
 ## The bar on this PC (user's runs)
 - Basalt on a single GPU here: ~2,000 tok/s prompt, ~70 decode (user's numbers). Three cards: IQ3_S 1,898 / 101.6
   (18k), 2,499 / 93.9 (199k); IQ4_XS 1,688 / 73.4, 2,571 / 64.7. The extra cards buy decode, not prompt speed.
@@ -282,8 +288,6 @@ Loop stopped (2026-11-07): the rest are each <= ~5% of the V100's 9.5 s.
 - gdn: Strata's V100 path (src/prefill/gdn_chunk.cu: cumsum/kkt/wmma kernels) has a different structure from
   Basalt's gdn_chunked.cu; a port is a rewrite for <= ~0.5 s. Strata also has src/split/src/moe_mma.cuh
   (m8n8k4 expert products, 64-row jobs) - a reference if the expert tile loader gets reworked.
-(old) Experts on the V100 at ~17 TOPS of dp4a (~60% of peak): next step is int8 -> fp16 in registers and m8n8k4 HMMA
-   (exact: per-32 integer sums < 2^24), several times the dp4a rate.
 3. gdn_chunked on WMMA/FP16.
 4. (done) drafter-row report made async.
 5. Rebalance layer split once the V100 is faster (more layers to it). IQ4_XS: only with a cap on the V100 cache
