@@ -118,18 +118,15 @@ variants are dead code on 3090/V100); native_mmvq upstream layout (no faster: 1.
   two-card (numbers not shared).
 Specs (V100 PCIe / 3090): FP32 14 / 36 TFLOPS; FP16 tensor fp32-acc ~112 / ~71; INT8 dp4a ~56 / int8 TC ~284;
 bandwidth 900 / 936 GB/s. The V100 wins only on fp16 tensor cores.
-Ranked queue (agent estimates, unmeasured unless noted):
-Decode (per window; V100 stage 12.8 ms of 22.9 verify):
-1. Dense GEMV for sm_70 in sFNX's q8s shape (warp per 1-4 rows, 16 B loads, T-templated, q|k|v segments in one
-   launch): dense_tc.cu is excluded from sm70 cubins, so V100 runs native_mmvq exact (one row per 128-thread CTA)
-   for qkv 1.18 + QSA q 0.45 + out-proj 0.68 ms. ~0.8-1.1 ms.
-2. Shared expert folded into the glue gate/up and down launches (~6 launches/layer): ~0.5 ms.
-3. Head proxy scoring dp4a-native on sm_70 (q6k_head.cu emulates mma_s8_16832 with shuffles): ~0.25-0.4 ms.
-4. Router GEMV + top-10 + route in one launch (last-block pattern): ~0.15-0.2 ms.
-5. One GDN rec launch on sm_70 (atomic per-head counter for the norm, z merged into qkv): ~0.15-0.25 ms.
-6. QSA: fewer projection launches; top-k histogram atomics aggregated with __match_any_sync: ~0.25 ms.
-7. Single-launch hc read (sFNX k_hc: grid = SMs, grid barriers): up to ~1.5 ms more; high effort.
-Drafts: A/B fixed T=8 vs the cum_adapt cutoff (avg T 2.9 here; stages barely depend on T): +5-15% prose, low effort.
+Decode, measured 11-09 (IQ4_XS 10,29, 18k; V100 stage 10.73 ms/window; benches in `<scratchpad>/gt/`):
+- Done: hc8 read rewrite (-0.84 ms), native_gu_multi_kernel 4 blocks/SM on sm_70 (IQ4_XS gate/up 101 -> 81 us, -0.12).
+- Dense: the UD pack's projections run Q6_K (its GGUF section; 86 launches/window). T=3 at 1.8x the HBM floor (qkv 47
+  vs 27 us). Tried, bitwise, no gain: activations in smem + warp per row, int->float by magic add, 2-4 rows a warp
+  sharing activation loads (+8% at best). Next is a numerics change (fp16 HMMA): ~0.3-0.5 ms. Q8_0 at 1.15-1.3x floor.
+- Experts (27 a layer, one token each): V100 gu 81-84 us, down 59-67 us (~450 GB/s); 3090 600-750 GB/s. IQ3_XXS gu2
+  uses 128 regs and spills under any bound. The glue path needs hc_fused (cc 12 only).
+- Head: Q8_0 screen 516 MB/window in 0.81 ms (~75% of HBM): leave. "GPU-reach wait" is host time overlapping GPU work.
+- Launch gaps: V100 graph 618 nodes at T=3 (~32/layer) at ~1.9 us; each fusion of one node a layer saves ~36 us.
 Prompt (V100 ~9.5 s busy per 18k):
 1. Expert products as fp16-dequant m8n8k4 HMMA (sFNX moe_mma.cuh: weights to fp16 in smem with the scale folded,
    fp16 activations, 64x64x64 tiles, one launch per layer over a job list, no gather): ~1.4-1.8 s. IQ3_S blocks are
