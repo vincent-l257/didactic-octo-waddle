@@ -241,6 +241,12 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
 - Open: in that test the FP16 path is ~20% off the reference for IQ3_XXS gate|up or Q5_0 down (Q4_K / Q8_0 is
   fine) though its dequantized weights match ggml's; not found yet. No pack layer takes that path for them now.
 
+## Shallower ring and Parsec (IQ4_XS 10,29, 18k, `--vram-reserve-mib 1536`, one run each)
+- Parsec streaming needs VRAM on the 5070 Ti and 3090. With the default 256 MiB reserve (339 MiB left free) every
+  stage stalls, at ring 256 and 128 alike: the earlier ring-128 "crawl" was this, not the ring. Bench with 1536.
+- Ring 256: **1,747 / 90.1** (9.74 s; streamed 5,547 / 8,277). Ring 128: 1,722 / 90.5 (9.92 s; 5,065 / 7,815).
+  ~7% fewer experts streamed, but less copy overlap: no gain. Ring stays 256; the switch was not kept.
+
 ## The bar on this PC (user's runs)
 - Basalt on a single GPU here: ~2,000 tok/s prompt, ~70 decode (user's numbers). Three cards: IQ3_S 1,898 / 101.6
   (18k), 2,499 / 93.9 (199k); IQ4_XS 1,688 / 73.4, 2,571 / 64.7. The extra cards buy decode, not prompt speed.
