@@ -62,6 +62,14 @@ __device__ __forceinline__ int2 get_int_from_table_16(const int& q4, const int8_
 }
 #define ggml_cuda_dp4a(a, b, c) DP4A((a), (b), (c))
 
+// native_gu_multi_kernel's blocks per SM on cc 7.0: more warps in flight hide the HBM latency of its row loads
+// (it fits in 64 registers there without spilling); the other expert kernels spill under such a bound and slow down
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 700
+#define GU_MULTI_MINB 4
+#else
+#define GU_MULTI_MINB 1
+#endif
+
 // ---------------------------------------------------------------- the dot products (vecdotq.cuh)
 __device__ __forceinline__ float vec_dot_q2_0_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
                                                    const int& kbx, const int& iqs) {
@@ -1356,7 +1364,7 @@ __global__ void __launch_bounds__(256) native_gu_kernel(const unsigned long long
 constexpr int GRP_NC = 6;
 
 template<int TG, bool STAGE_GRID = kStageIqGrid<TG>>
-__global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned long long* __restrict__ grp_ptr,
+__global__ void __launch_bounds__(256, GU_MULTI_MINB) native_gu_multi_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                               const int32_t* __restrict__ grp_start,
                                                               const int32_t* __restrict__ n_groups,
                                                               const int32_t* __restrict__ ent_tok,
