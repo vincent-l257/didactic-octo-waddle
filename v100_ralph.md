@@ -57,10 +57,10 @@ sm_70/86/120). Engine-alone driver: `<scratchpad>/eng.sh` (GEN/GENT on stdin, QU
 Measured: graph node gap V100 2.2 us vs 5070 Ti 0.8 us (~50-90 us/layer of the V100's 640). V100 decode clocks
 1380 MHz (its max), 97 W; 3090 ~1770 MHz. Dead ends: fused_gr plain/split/staged variants (decode runs hc8_gr, the
 variants are dead code on 3090/V100); native_mmvq upstream layout (no faster: 1.25 vs 1.18 ms).
-hc8 read at T=3, us (V100 / 3090): norm 4.9/3.6, down 34.7/17.1, up 19.1/15.7.
-- **Done:** hc8_down with coalesced 4-column lanes (256 threads): V100 down 34.7 -> 21.4 us, 3090 neutral; hc8_parity
-  ok (T-bitwise). Decode 90.1 -> 92.1 tok/s (IQ3_S 10,28, 262k, 18k prompt). Numerics: summation order only.
-- Tried, dropped: norm folded into down (registers, slower); up with 16-byte loads (slower at T>=3).
+- **Done (11-09):** hc8 read as two kernels: split-K down (1280-column slices, norm folded in, rs per slice), up with a
+  thread per half row and its weights loaded before lo is finished. One read at T=3, us old/new (`<scratchpad>/gt/hc8d.cu`):
+  V100 55.9/33.9, 3090 40.8/25.2, 5070 Ti 31.3/14.6. IQ4_XS 10,29 long400, profiled: V100 stage 11.69 -> 10.85 ms, 3090
+  7.29 -> 7.03, verify 23.81 -> 23.02, 84.2 -> 84.8 tok/s. Numerics: sum order only; the reply diverges at char 91.
 - Draft threshold A/B (BASALT_DRAFT_TH temp override, IQ3_S 10,28, 262k, long400, no profiler; same greedy text):
   default 0.35: 102.1 tok/s (T 3.24, 2.46 tok/window, verify 21.66 ms); 0.15: 96.3 (T 4.01, 2.60, 24.10);
   0.5: 101.5 (T 3.13, 2.41, 21.30). A row costs ~3 ms here (10 more experts per token), not ~0: default stays.
