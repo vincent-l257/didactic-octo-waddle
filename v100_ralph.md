@@ -257,9 +257,8 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
   15,360 MiB read at ~842 GB/s, the rest at 6.7 GB/s. WDDM never refuses: past VRAM it backs allocations with system
   RAM (63 GiB allocated). ~440 MiB past the reported free is real VRAM; beyond it spills (fits the Parsec stalls).
 
-- Elastic KV upper bound (64k context frees 262k KV: 3090 cache 8503 -> 8901 slots, RAM 9.8 -> 8.5 GiB; split
-  10,29, two runs each, warm 262k vs fresh 64k): 18k prompt 1,944 -> 2,007 tok/s, decode within noise (81-100 both),
-  hits 98.7-99.8% both. <= ~3%: elastic KV for the layer split is not worth building.
+- Elastic KV upper bound (64k context: 3090 cache 8503 -> 8901 slots, RAM 9.8 -> 8.5 GiB; two runs each): 18k prompt
+  1,944 -> 2,007 tok/s, decode and hits within noise. <= ~3%: not worth building for the layer split.
 
 ## The bar on this PC (user's runs)
 - Basalt on a single GPU here: ~2,000 tok/s prompt, ~70 decode (user's numbers). Three cards: IQ3_S 1,898 / 101.6
