@@ -241,6 +241,12 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
 - Open: in that test the FP16 path is ~20% off the reference for IQ3_XXS gate|up or Q5_0 down (Q4_K / Q8_0 is
   fine) though its dequantized weights match ggml's; not found yet. No pack layer takes that path for them now.
 
+## The bar on this PC (user's runs)
+- Basalt on a single GPU here: ~2,000 tok/s prompt, ~70 decode (user's numbers). Three cards: IQ3_S 1,898 / 101.6
+  (18k), 2,499 / 93.9 (199k); IQ4_XS 1,688 / 73.4, 2,571 / 64.7. The extra cards buy decode, not prompt speed.
+- This PC: Ryzen 5600X (no AVX-512), 64 GB, 5070 Ti and 3090 at PCIe 3.0 x8, V100 at 2.0 x1. The Lamina/Strata trio
+  read a 16k prompt at ~990 here. Split and margin tuning is fitted to these links; a planned Threadripper changes them.
+
 ## Ideas queue
 1. (done) qsa split; attention ported.
 1b. (done) rebalanced: 8,28 best for prompts. Retry 8,27 / 9,28 once things shift again.
