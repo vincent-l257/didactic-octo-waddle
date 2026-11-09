@@ -254,6 +254,10 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
 - Stages ms/window 18k -> 199k: 5070 Ti 3.99 -> 4.13, 3090 7.29 -> 7.79, V100 11.69 -> 12.46; GPU-reach wait 2.80 -> 3.56.
   Only QSA scores+topk grows with context (0.03/0.18/0.28 -> 0.13/0.76/1.08). The V100 is half of verify.
 
+- 5070 Ti under WDDM (probe: 256 MiB chunks until cudaMalloc fails, then read each): CUDA reports 14,921 MiB free;
+  15,360 MiB read at ~842 GB/s, the rest at 6.7 GB/s. WDDM never refuses: past VRAM it backs allocations with system
+  RAM (63 GiB allocated). ~440 MiB past the reported free is real VRAM; beyond it spills (fits the Parsec stalls).
+
 ## The bar on this PC (user's runs)
 - Basalt on a single GPU here: ~2,000 tok/s prompt, ~70 decode (user's numbers). Three cards: IQ3_S 1,898 / 101.6
   (18k), 2,499 / 93.9 (199k); IQ4_XS 1,688 / 73.4, 2,571 / 64.7. The extra cards buy decode, not prompt speed.
@@ -283,8 +287,6 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
    machine (docs/precision/quality.md).
 
 Loop stopped (2026-11-07): the rest are each <= ~5% of the V100's 9.5 s.
-- x.gather is mostly profiler syncs (~1900 ticks); the real copy is ~3 ms per layer-chunk (~0.2-0.3 s total).
-- iq3s_grid is __device__ (global, L1-cached), not constant memory: not the tile-loader cost.
 - gdn: Strata's V100 path (src/prefill/gdn_chunk.cu: cumsum/kkt/wmma kernels) has a different structure from
   Basalt's gdn_chunked.cu; a port is a rewrite for <= ~0.5 s. Strata also has src/split/src/moe_mma.cuh
   (m8n8k4 expert products, 64-row jobs) - a reference if the expert tile loader gets reworked.
