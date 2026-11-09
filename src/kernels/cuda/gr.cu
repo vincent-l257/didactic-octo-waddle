@@ -80,7 +80,7 @@ void gr_read(const float* R, const float* w_norm, const uint16_t* w_down, const 
         FusedGrArgs fa;
         fa.R = R; fa.apply = false; fa.w_norm = w_norm; fa.w_down = w_down; fa.w_up = w_up; fa.w_inject = w_inject;
         fa.eps = eps; fa.lo = ws.lo; fa.rs = ws.gated; fa.inject_out = inject; fa.mixed = mixed;
-        if (hc8_gr_read_multi(&fa, 1, s.n_embd, s.hc, stream)) {
+        if (hc8_gr_read_multi(&fa, 1, s.n_embd, s.hc, ws.xn, stream)) {
             if (stream == nullptr && cudaDeviceSynchronize() != cudaSuccess) {
                 basalt::log::error("basalt", "gr_read: the 8-bit read failed");
                 std::exit(1);

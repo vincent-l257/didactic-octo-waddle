@@ -700,7 +700,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             std::exit(1);
         }
     }
-    if (hc8_gr_read_multi(a, n_tok, N, HC, stream)) return;
+    if (hc8_gr_read_multi(a, n_tok, N, HC, xn_scratch, stream)) return;
     m.xn = xn_scratch;
     m.T = n_tok;
     cudaStream_t st = (cudaStream_t) stream;
@@ -724,7 +724,7 @@ void fused_gr_read(const FusedGrArgs& a, void* stream) {
         basalt::log::error("basalt", "fused_gr_read: invalid arguments");
         std::exit(1);
     }
-    if (hc8_gr_read_multi(&a, 1, N, HC, stream)) return;
+    if (hc8_gr_read_multi(&a, 1, N, HC, a.scratch, stream)) return;
     cudaStream_t st = (cudaStream_t) stream;
     basalt::kernels::launch_cc(gr_down_kernel, DOWN_BLOCKS + 1, THREADS, 0, st, a);
     basalt::kernels::launch_cc(gr_up_kernel, UP_BLOCKS, THREADS, 0, st, a);

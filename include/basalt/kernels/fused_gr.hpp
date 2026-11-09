@@ -36,6 +36,7 @@ struct FusedGrArgs {
     float* rs = nullptr;               ///< workspace, hc floats
     float* inject_out = nullptr;       ///< hc floats (when w_inject)
     float* mixed = nullptr;            ///< n_embd
+    float* scratch = nullptr;          ///< hc * n_embd floats: fused_gr_read's workspace on the 8-bit copies
 };
 
 bool fused_gr_supported(int64_t n_embd, int64_t hc, int64_t hc_lr);
@@ -49,11 +50,11 @@ constexpr int kFusedGrMaxT = 8;
 void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream,
                          unsigned long long* stamp_buf = nullptr, int stamp_i0 = 0);
 
-/// The same read on the matrices' 8-bit copies (hc_fused.hpp's hc8_view) in three kernels (norm,
-/// down + inject, up); a token's outputs come from the same operations whatever n_tok.  `rs` and `lo` are written as
-/// above; R' goes to R_out (when apply) before the down kernel reads it.  False, with nothing enqueued, when w_down has
-/// no copy.  fused_gr_read, fused_gr_read_multi and gr_read take this path for such matrices.
-bool hc8_gr_read_multi(const FusedGrArgs* a, int n_tok, int64_t n_embd, int64_t hc, void* stream);
+/// The same read on the matrices' 8-bit copies (hc_fused.hpp's hc8_view) in two kernels (down + inject + norm, up);
+/// a token's outputs come from the same operations whatever n_tok.  `rs`, `lo` and R_out (when apply) are written as
+/// above.  `scratch` is n_tok * hc * n_embd floats.  False, with nothing enqueued, when w_down has no copy.
+/// fused_gr_read, fused_gr_read_multi and gr_read take this path for such matrices.
+bool hc8_gr_read_multi(const FusedGrArgs* a, int n_tok, int64_t n_embd, int64_t hc, float* scratch, void* stream);
 /// The multi read's variants, all computing every output with the plain read's operations in its order, so bitwise
 /// the plain read's and the single-token read's: plain (the norm one block per token, the down projection on 41 blocks), split (the norm
 /// one block per token and stream, then the plain down projection) and staged (split's norm, and the down
