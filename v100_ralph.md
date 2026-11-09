@@ -139,7 +139,6 @@ Prompt (V100 ~9.5 s busy per 18k):
 3. WMMA GEMM tuning (double buffer, BK=64, skinny tiles, merged alpha|beta): ~0.35-0.5 s.
 4. QSA prompt attention with single f16 q/p (drop hi/lo): up to ~0.2-0.4 s, numerics risk.
 5. QSA scorer on WMMA f16 hi/lo: ~0.06-0.09 s.
-Not portable: sFNX's tensor-parallel split (needs P2P at 5-8 GB/s; the V100 is on Gen2 x1, Windows).
 
 ## IQ4_XS on three cards (same build, 18k prompt, 32k context, one run each)
 | setup | prompt tok/s | decode tok/s | V100 busy |
@@ -258,6 +257,10 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
   15,360 MiB read at ~842 GB/s, the rest at 6.7 GB/s. WDDM never refuses: past VRAM it backs allocations with system
   RAM (63 GiB allocated). ~440 MiB past the reported free is real VRAM; beyond it spills (fits the Parsec stalls).
 
+- Elastic KV upper bound (64k context frees 262k KV: 3090 cache 8503 -> 8901 slots, RAM 9.8 -> 8.5 GiB; split
+  10,29, two runs each, warm 262k vs fresh 64k): 18k prompt 1,944 -> 2,007 tok/s, decode within noise (81-100 both),
+  hits 98.7-99.8% both. <= ~3%: elastic KV for the layer split is not worth building.
+
 ## The bar on this PC (user's runs)
 - Basalt on a single GPU here: ~2,000 tok/s prompt, ~70 decode (user's numbers). Three cards: IQ3_S 1,898 / 101.6
   (18k), 2,499 / 93.9 (199k); IQ4_XS 1,688 / 73.4, 2,571 / 64.7. The extra cards buy decode, not prompt speed.
@@ -273,8 +276,6 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
     Parked: the serve prompt split (prompt_split.cpp) is for one decode card plus helpers, not layer-split decode,
     so this needs new plumbing; its ceiling is about the two-card rate (~1300), since every chunk streams the V100
     layers' experts (~16 GB IQ3_S) from RAM into the 3090 over Gen3 x8. The three-card pipeline streams none of it.
-1d. (tried, dropped) short first chunk for layer splits (BASALT_SPLIT_HEAD, prompt.cpp set_head_chunk): 2048 ->
-    1387 tok/s vs ~1370-1382 without (noise), more experts streamed. Reverted.
 2. (tried, parked) m8n8k4 FP16 expert dot (v100_hmma_experts.patch): identical output, no gain (V100 9.56 s vs
     9.48 s dp4a). First version spilled (255 regs, up to 648 B stack); fixed by one row tile of accumulators at a
     time. The products are bound by tile loading (IQ3_S decode in load_tiles), which both paths share.
