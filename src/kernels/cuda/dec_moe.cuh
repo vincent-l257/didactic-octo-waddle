@@ -370,7 +370,10 @@ __global__ void __launch_bounds__(kDmThreads) dm_route_kernel(DmRouteArgs a) {
         }
     }
     if (!pub) return;
-    __threadfence_system();
+    // the system-scope fence only where this block wrote mapped memory (the header, the FFN input, the q8_1 rows):
+    // the peers and the host read nothing else, and the fence is per block and serialises on some links
+    if (blockIdx.x == 0 || s_ncpu > 0 || npeers > 0 || a.rows) __threadfence_system();
+    else __threadfence();
     __syncthreads();
     if (tid == 0) {
         const unsigned int arrived = atomicAdd(a.ctr, 1u) + 1u;
