@@ -49,6 +49,9 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
     // one launch, the same bits
     const bool fused_pre = st.kv_int8 && !st.kv_rot && !st.kv_hybrid && !st.kv_q4 &&
                            qsa_dec_fused_supported(s);
+    // K8V4 the same way, the same bits: K's rows with V's INT8 half folded onto K (as kv_append_q8_step is called
+    // below), V rotated into its Q4_0 rows by one more launch
+    const bool hybrid_post = st.kv_hybrid && !v_.batch_rec_ && qsa_dec_fused_supported(s);
     auto kv_post_args = [&] {
         QsaDecKvPost kp;
         kp.kcur = v_.kcur_; kp.vcur = v_.vcur_; kp.pos_k = pos_k;
@@ -59,6 +62,7 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
         kp.tail = st.idx_tail; kp.dead = st.idx_dead; kp.pooled = st.idx_pooled; kp.block_pos = st.idx_block_pos;
         kp.tail_snap = v_.batch_rec_ ? v_.tail_snap_b_ : v_.tail_snap_ + (size_t) qi * TS;
         kp.max_cells = (int) st.max_cells; kp.eps = EPS;
+        if (hybrid_post) { kp.vcur = v_.kcur_; kp.v_q = st.k_q; kp.v_scale = st.k_scale; kp.host = KvHostPools{}; }
         return kp;
     };
     // a batch window's rows are different sequences: the per-slot pointers come from the layer's table
@@ -76,7 +80,7 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
     };
     // K, V and the indexer key/query each on a branch of their own, beside the query (one row: the
     // multi-row GEMV is the one-row one)
-    const bool qsaf_wide = fused_pre && (qb || n == 1) && v_.qs_[0] != nullptr;
+    const bool qsaf_wide = (fused_pre || hybrid_post) && (qb || n == 1) && v_.qs_[0] != nullptr;
     // the query projection's query rows first; its gate rows, which only the merge reads, beside the selection and the
     // attention chunks
     const bool qhalf = qsaf_wide && !v_.batch_rec_ && N == 2560 &&
@@ -117,11 +121,15 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
             dense_proj(32, wk->native_type, wk->native_data, v_.xq_, v_.kcur_, (int) N, (int) (NKV * HD),
                        n, v_.qs_[0]);
         }
-        cudaStreamWaitEvent(v_.qs_[0], v_.qev_[1], 0);
+        if (!hybrid_post) cudaStreamWaitEvent(v_.qs_[0], v_.qev_[1], 0);
         {
             QsaDecKvPost ka = kv_post_args();
             ka.part = 1;
             kv_post(ka, v_.qs_[0]);
+        }
+        if (hybrid_post) {
+            cudaStreamWaitEvent(v_.qs_[0], v_.qev_[1], 0);
+            kv_rotate_append_q4(v_.vcur_, st.v_q4, st.page_table, v_.step_, n, s, v_.qs_[0]);
         }
         cudaEventRecord(v_.qev_[3], v_.qs_[0]);
         cudaEventRecord(v_.qev_[4], v_.qs_[1]);
@@ -159,18 +167,10 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
         dense_proj(32, wk->native_type, wk->native_data, v_.xq_, v_.kcur_, (int) N, (int) (NKV * HD), n, cs);
         dense_proj(32, wv->native_type, wv->native_data, v_.xq_, v_.vcur_, (int) N, (int) (NKV * HD), n, cs);
     }
-    // K8V4 in two launches, the same bits: K's norm, RoPE and INT8 rows with the indexer appends (V's INT8 half folded
-    // onto K, as kv_append_q8_step is called below), and V rotated into its Q4_0 rows
-    const bool hybrid_post = st.kv_hybrid && !v_.batch_rec_ && qsa_dec_fused_supported(s);
-    if (fused_pre) {
+    if (fused_pre || hybrid_post) {
         kv_post(kv_post_args(), cs);
         stamp(l, 8);
-    } else if (hybrid_post) {
-        QsaDecKvPost kp = kv_post_args();
-        kp.vcur = v_.kcur_; kp.v_q = st.k_q; kp.v_scale = st.k_scale; kp.host = KvHostPools{};
-        qsa_dec_kv_post(kp, n, s, rope_scaling(), cs);
-        stamp(l, 8);
-        kv_rotate_append_q4(v_.vcur_, st.v_q4, st.page_table, v_.step_, n, s, cs);
+        if (hybrid_post) kv_rotate_append_q4(v_.vcur_, st.v_q4, st.page_table, v_.step_, n, s, cs);
     } else {
         if (qb) norm_rope(v_.kcur_, wkn, (int) (n * NKV), (int) HD, pos_k);
         else for (int t = 0; t < T; ++t) norm_rope(v_.kcur_ + t * NKV * HD, wkn, (int) NKV, (int) HD, v_.pos_ + t * NH);
