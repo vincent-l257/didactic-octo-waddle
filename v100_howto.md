@@ -59,6 +59,27 @@ The method behind `v100_ralph.md` (results and queue live there). `<sp>` is the 
   - `decode GPU stages, stage N` is ms per verify window per card.
   - `decode timing:` gives windows, avg T, tokens per window and verify ms.
 - Nsight Systems hangs this engine on this box (through serve and through `--serve` stdin alike). Don't use it.
+  Rechecked 11-10: under `nsys profile` the engine prints nothing, not even the model load, until nsys's
+  `--duration` kills it. Driving `--serve` directly, send `QUIT` only after `DONE`: a line that arrives while
+  the prompt is read cancels the request (`DONE ... cancel`, 0 generated).
+
+## Prompt-speed A/B (short and long prompts)
+- Prompt set in `<sp>`, each with a different prefix so no conversation-cache reuse: `p1_0`, `p1_1` (~1.4k tokens),
+  `p4_0..2` (4.1k, 4.2k, 4.6k), all cut from `long400.json` with "Summarize the above in one sentence", 16 out;
+  then `long400` (18,096, 400 out). `h80.json`: the first 300,000 chars of `huge.json` (88,504 tokens), 16 out.
+- `ab_prompt.sh <tag> <server log> <port>`: waits for "ready", sends p1_0, p4_0, p1_1, p4_1, p4_2, long400 in that
+  order, prints prompt n, prompt tok/s and server prompt ms. p1_0 is always slow (first request warms up): compare
+  from p4_0 on.
+- `mt.sh <tag> <port>`: a two-turn chat (`mt1.json`, then the reply plus one more user line). Turn 2 must show
+  `cache_n` ~2260 (checkpoint reused). Same server history, same build: replies identical; two host-restore runs
+  can still differ late in turn 2, so compare a change against more than one baseline run.
+- Test servers: copy `serve4_s1029_8095.bat` with `--port 8096` (plus `--prefill N` for chunk sweeps). The user's
+  server is port 8095; stop it before building (a running exe makes the link fail and leaves a stale binary).
+- Per-request fixed cost: the engine's `prompt N tokens ... read in X ms` minus the same request's
+  `prompt stages: ... in Y ms` is time outside the pipeline (lend, checkpoint, refill, residency upload). To split
+  it, add temporary `basalt::log::info` timers around `lend`, `read_part`, `checkpoint_at`, `refill` and
+  `res_upload` (request_prefill.cpp, prompt.cpp, tiers.cpp), then remove them before committing.
+- Don't `git stash` here: the user's `tools/*` mode changes block the pop.
 
 ## Fast restarts: a few layers only
 - `--debug-layers N` makes the engine run only the first N layers; the output is meaningless.
