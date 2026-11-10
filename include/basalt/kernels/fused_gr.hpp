@@ -36,6 +36,9 @@ struct FusedGrArgs {
     float* rs = nullptr;               ///< workspace, hc floats
     float* inject_out = nullptr;       ///< hc floats (when w_inject)
     float* mixed = nullptr;            ///< n_embd
+    /// mixed's q8_1 rows (native_quantize_q8_1's bytes), or null; in a multi read token t's at a[0].xq + t * n_embd / 32
+    /// blocks
+    void* xq = nullptr;
     float* scratch = nullptr;          ///< hc * n_embd floats: fused_gr_read's workspace on the 8-bit copies
 };
 

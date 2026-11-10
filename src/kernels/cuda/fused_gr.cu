@@ -2,6 +2,7 @@
 #include "basalt/kernels/fused_gr.hpp"
 #include "basalt/kernels/sm70_emu.cuh"
 #include "basalt/kernels/bf16_bits.hpp"
+#include "basalt/kernels/native_mmvq.hpp"
 #include "basalt/kernels/pdl.hpp"
 #include "basalt/kernels/verify_kernels.hpp"
 #include "smem_opt_in.cuh"
@@ -706,6 +707,8 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
     cudaStream_t st = (cudaStream_t) stream;
     // v1, or the bitwise-equal v2 / v3 this card's check accepted
     launch_multi(m, fused_gr_variant(), st, stamp_buf, stamp_i0);
+    for (int t = 0; t < n_tok; ++t)
+        if (a[t].xq) native_quantize_q8_1(a[t].mixed, a[t].xq, N, 1, st ? st : cudaStreamLegacy);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "fused_gr_read_multi: %s", cudaGetErrorString(e));
@@ -728,6 +731,7 @@ void fused_gr_read(const FusedGrArgs& a, void* stream) {
     cudaStream_t st = (cudaStream_t) stream;
     basalt::kernels::launch_cc(gr_down_kernel, DOWN_BLOCKS + 1, THREADS, 0, st, a);
     basalt::kernels::launch_cc(gr_up_kernel, UP_BLOCKS, THREADS, 0, st, a);
+    if (a.xq) native_quantize_q8_1(a.mixed, a.xq, N, 1, st ? st : cudaStreamLegacy);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         basalt::log::error("basalt", "fused_gr_read: %s", cudaGetErrorString(e));

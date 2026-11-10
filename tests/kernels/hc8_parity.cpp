@@ -4,7 +4,8 @@
 //   1. hc8_gr_read_multi (what fused_gr_read, fused_gr_read_multi and gr_read run for such matrices) against
 //      fused_gr_read_multi on the bf16 matrices (the error the copies add) and on the copies dequantized to bf16 (the
 //      kernels' own error), 1..8 tokens, with and without the pending write and the injection; every token's outputs
-//      bitwise the same whatever the token count and column; gr_read bitwise the one-token read.
+//      bitwise the same whatever the token count and column; gr_read bitwise the one-token read; mixed's q8_1 rows
+//      (FusedGrArgs::xq, from the 8-bit read's up kernel and from the bf16 read) bitwise native_quantize_q8_1's.
 //   2. Gemm::bf16_w (the prompt path's product on a copy) against Gemm::bf16 on the bf16 matrix and against a
 //      double-precision product with the copy's exact values, on the prompt path's hc shapes, with a scratch that holds
 //      the whole matrix and with one that slices it (within fp32 rounding: cuBLAS's kernel can change with the width).
@@ -14,6 +15,7 @@
 #include "basalt/kernels/fused_gr.hpp"
 #include "basalt/kernels/gr.hpp"
 #include "basalt/kernels/hc_fused.hpp"
+#include "basalt/kernels/native_mmvq.hpp"
 #include "basalt/prefill/gemm.hpp"
 
 #include <cuda_runtime.h>
@@ -125,7 +127,8 @@ int main(int argc, char** argv) {
     Out o[3];
     for (auto& x : o) alloc_out(x);
     // run `which` (0: hc8 copies, 1: bf16, 2: dequantized copies through the bf16 read) on tokens `tok` in columns 0..n-1
-    auto run = [&](int which, Out& out, const std::vector<int>& tok, bool apply, bool inject) {
+    // xq: also mixed's q8_1 rows, column c's at block c * N / 32
+    auto run = [&](int which, Out& out, const std::vector<int>& tok, bool apply, bool inject, uint8_t* xq = nullptr) {
         cudaMemcpy(out.R, R.data(), R.size() * 4, cudaMemcpyHostToDevice);
         K::FusedGrArgs a[K::kFusedGrMaxT];
         for (size_t c = 0; c < tok.size(); ++c) {
@@ -140,12 +143,33 @@ int main(int argc, char** argv) {
             x.eps = EPS; x.lo = out.lo + (size_t) t * LR; x.rs = out.rs + (size_t) t * HC;
             x.inject_out = out.io + (size_t) t * HC;
             x.mixed = out.mix + (size_t) t * N;
+            x.xq = xq ? xq + c * (size_t) (N / 32) * 36 : nullptr;
         }
         K::fused_gr_read_multi(a, (int) tok.size(), out.xn, nullptr);
         cudaDeviceSynchronize();
     };
     std::vector<int> all(TM);
     for (int t = 0; t < TM; ++t) all[t] = t;
+    const size_t QB = (size_t) (N / 32) * 36;
+    uint8_t *xq, *xq_ref;
+    cudaMalloc((void**) &xq, TM * QB); cudaMalloc((void**) &xq_ref, TM * QB);
+    // the read with its q8_1 rows: mixed as without them, the rows native_quantize_q8_1's of mixed, column by column
+    auto check_q8 = [&](int which, const std::vector<int>& tok, bool apply, bool inject,
+                        const std::vector<float>& mix) {
+        cudaMemset(xq, 0x5a, TM * QB);
+        run(which, o[2], tok, apply, inject, xq);
+        bool ok = true;
+        for (size_t c = 0; c < tok.size(); ++c) {
+            const float* m = o[2].mix + (size_t) tok[c] * N;
+            ok = ok && std::memcmp(get(m, N).data(), mix.data() + (size_t) tok[c] * N, N * 4) == 0;
+            K::native_quantize_q8_1(m, xq_ref + c * QB, N, 1, cudaStreamLegacy);
+        }
+        cudaDeviceSynchronize();
+        std::vector<uint8_t> a(tok.size() * QB), b(tok.size() * QB);
+        cudaMemcpy(a.data(), xq, a.size(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(b.data(), xq_ref, b.size(), cudaMemcpyDeviceToHost);
+        return ok && a == b;
+    };
     for (int inject = 1; inject >= 0; --inject)
         for (int apply = 0; apply < 2; ++apply) {
             run(0, o[0], all, apply, inject);
@@ -188,6 +212,10 @@ int main(int argc, char** argv) {
             }
             std::printf("  token count / column independence: %s\n", same ? "bitwise" : "DIFFERS");
             expect(same, "token count / column independence");
+            const bool q8 = check_q8(0, all, apply, inject, h0[0]) && check_q8(0, {7, 2, 4}, apply, inject, h0[0]) &&
+                            check_q8(0, {5}, apply, inject, h0[0]) && check_q8(1, all, apply, inject, h1[0]);
+            std::printf("  q8_1 rows vs native_quantize_q8_1 (8-bit and bf16 reads): %s\n", q8 ? "bitwise" : "DIFFERS");
+            expect(q8, "q8_1 rows");
         }
     {   // gr_read on the copies: the one-token read
         const K::GrShapes gs{N, HC, LR};

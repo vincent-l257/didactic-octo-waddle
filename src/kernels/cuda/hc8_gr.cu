@@ -6,12 +6,15 @@
 //          R' * w_norm, R' = R + bo_prev * 2 sigmoid(inj_prev / hc) (written to R_out when apply), and the slice's
 //          sum of squares of R'
 //   up   : rs[c] = rsqrt(mean(R'[c]^2) + eps); lo[k] = silu(sum_s rs * part[s][k] / hc), inject[c] likewise without
-//          the silu; mixed[d] = mean_c xn[c,d] * sigmoid(q_up[c*n_embd + d] . lo), xn = R' * w_norm * rs
+//          the silu; mixed[d] = mean_c xn[c,d] * sigmoid(q_up[c*n_embd + d] . lo), xn = R' * w_norm * rs; when asked,
+//          mixed's q8_1 rows too (a CTA's 32 columns are one block), bitwise native_quantize_q8_1's
 //
 // rs is a per-slice factor, so the down dots leave it out.  Every token's values come from the same operations in the
 // same order whatever the token count.
 #include "basalt/kernels/fused_gr.hpp"
 #include "basalt/kernels/hc_fused.hpp"
+
+#include "basalt/kernels/q8_1_finite.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -54,12 +57,58 @@ struct Hc8Gr {
     const uint16_t* si;
     int sd_row, su_row, si_row;
     int T, n, hc, lr, ninj;
-    bool apply;
+    bool apply, q8;
     float eps;
+    void* xq;                          // mixed's q8_1 rows when q8, token t's n / 32 blocks at block t * n / 32
 };
 
 __device__ __forceinline__ float s8(uint32_t w, int j) { return (float) (int) (int8_t) (w >> (8 * j)); }
 __device__ __forceinline__ float f16f(uint16_t h) { return __half2float(__ushort_as_half(h)); }
+
+// native_quantize_q8_1's operations as its fast-math build emits them (flush-to-zero, approximate division)
+__device__ __forceinline__ float abs_ftz(float a) {
+    float r;
+    asm("abs.ftz.f32 %0, %1;" : "=f"(r) : "f"(a));
+    return r;
+}
+__device__ __forceinline__ float max_ftz(float a, float b) {
+    float r;
+    asm("max.ftz.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+    return r;
+}
+__device__ __forceinline__ float add_ftz(float a, float b) {
+    float r;
+    asm("add.ftz.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+    return r;
+}
+__device__ __forceinline__ float div_approx_ftz(float a, float b) {
+    float r;
+    asm("div.approx.ftz.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+    return r;
+}
+
+struct Q81 {
+    half2 ds;
+    int8_t qs[32];
+};
+
+// one warp, lane i holding value i of the block
+__device__ __forceinline__ void q8_1_block(float xi, Q81* __restrict__ y, int lane) {
+    float amax = abs_ftz(xi), sum = xi;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        amax = max_ftz(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+        sum = add_ftz(sum, __shfl_xor_sync(0xffffffffu, sum, o));
+    }
+    const float d = q8_1_finite(div_approx_ftz(amax, 127.0f));
+    int8_t q = 0;
+    if (amax != 0.0f) {
+        const float v = roundf(div_approx_ftz(xi, d));
+        q = (int8_t) (v > 127.0f ? 127.0f : v < -127.0f ? -127.0f : v);
+    }
+    y->qs[lane] = q;
+    if (lane == 0) y->ds = q8_1_ds(d, sum);
+}
 
 // The scratch: part[NS][nrows][NT] (the down dots), then ss[NS][NT] (the slices' sums of squares).
 static_assert((NS * (MAX_LR + GHC) + NS) <= GN * GHC, "the scratch fits n_tok * hc * n_embd floats");
@@ -167,11 +216,13 @@ __global__ void __launch_bounds__(256) hc8_down2_kernel(Hc8Gr p, float* scr) {
 }
 
 // grid n / 32: thread (d, c, h) takes half of row c*n + d (16-byte chunks h, h+2, ...) and writes R'[c, d] to R_out.
-// Every CTA first finishes rs, lo and the injection from the down slices; block 0 also writes them out.
-template <int NT>
+// Every CTA first finishes rs, lo and the injection from the down slices; block 0 also writes them out.  Q8: the
+// CTA's 32 columns of mixed also as one q8_1 block per token.
+template <int NT, bool Q8>
 __global__ void __launch_bounds__(256) hc8_up2_kernel(Hc8Gr p, const float* scr) {
     __shared__ __align__(16) float slo[NT * MAX_LR];
     __shared__ float srs[NT][GHC];
+    __shared__ float smix[Q8 ? NT : 1][32];
     const int nrows = p.lr + p.ninj, lr = p.lr;
     const int h = threadIdx.x & 1, c = (threadIdx.x >> 1) & 3, d = blockIdx.x * 32 + (threadIdx.x >> 3);
     const size_t row = (size_t) c * p.n + d;
@@ -261,7 +312,17 @@ __global__ void __launch_bounds__(256) hc8_up2_kernel(Hc8Gr p, const float* scr)
         float m = xn * (1.0f / (1.0f + expf(-a)));
         m += __shfl_xor_sync(0xffffffffu, m, 2);
         m += __shfl_xor_sync(0xffffffffu, m, 4);
-        if (h == 0 && c == 0) p.mixed[t][d] = m / (float) p.hc;
+        if (h == 0 && c == 0) {
+            p.mixed[t][d] = m / (float) p.hc;
+            if (Q8) smix[t][threadIdx.x >> 3] = m / (float) p.hc;
+        }
+    }
+    if (Q8) {   // warp t quantizes token t's block
+        __syncthreads();
+        const int w = threadIdx.x >> 5;
+        if (w < NT)
+            q8_1_block(smix[w][threadIdx.x & 31], static_cast<Q81*>(p.xq) + (size_t) w * (p.n / 32) + blockIdx.x,
+                       threadIdx.x & 31);
     }
 }
 
@@ -271,7 +332,10 @@ namespace {
 template <int NT> void launch_nt(const Hc8Gr& p, float* scr, cudaStream_t st) {
     const dim3 g((unsigned) NS, (unsigned) ((p.lr + p.ninj + RG - 1) / RG));
     basalt::kernels::launch_cc(hc8_down2_kernel<NT>, g, 256, 0, st, p, scr);
-    basalt::kernels::launch_cc(hc8_up2_kernel<NT>, (unsigned) (GN / 32), 256, 0, st, p, (const float*) scr);
+    if (p.q8)
+        basalt::kernels::launch_cc(hc8_up2_kernel<NT, true>, (unsigned) (GN / 32), 256, 0, st, p, (const float*) scr);
+    else
+        basalt::kernels::launch_cc(hc8_up2_kernel<NT, false>, (unsigned) (GN / 32), 256, 0, st, p, (const float*) scr);
 }
 }  // namespace
 
@@ -296,9 +360,12 @@ bool hc8_gr_read_multi(const FusedGrArgs* a, int n_tok, int64_t n_embd, int64_t 
         std::exit(1);
     }
     Hc8Gr p{};
+    p.q8 = a[0].xq != nullptr;
     for (int t = 0; t < n_tok; ++t) {
         const FusedGrArgs& x = a[t];
-        if (!x.R || !x.w_norm || !x.lo || !x.rs || !x.mixed || (inj && !x.inject_out) || x.apply != a[0].apply ||
+        const void* xq = p.q8 ? static_cast<char*>(a[0].xq) + (size_t) t * (n_embd / 32) * sizeof(Q81) : nullptr;
+        if (x.xq != xq || !x.R || !x.w_norm || !x.lo || !x.rs || !x.mixed || (inj && !x.inject_out) ||
+            x.apply != a[0].apply ||
             (x.apply && (!x.bo_prev || !x.inj_prev || !x.R_out)) || x.w_down != a[0].w_down || x.w_up != a[0].w_up ||
             x.w_inject != a[0].w_inject || x.w_norm != a[0].w_norm) {
             basalt::log::error("basalt", "hc8_gr_read: invalid arguments for token %d", t);
@@ -311,6 +378,7 @@ bool hc8_gr_read_multi(const FusedGrArgs* a, int n_tok, int64_t n_embd, int64_t 
     p.qd = vd.q; p.sd = vd.s; p.sd_row = vd.srow;
     p.qu = vu.q; p.su = vu.s; p.su_row = vu.srow;
     if (inj) { p.qi = vi.q; p.si = vi.s; p.si_row = vi.srow; }
+    p.xq = a[0].xq;
     p.T = n_tok; p.n = (int) n_embd; p.hc = (int) hc; p.lr = vd.rows; p.ninj = inj ? (int) hc : 0;
     p.apply = a[0].apply; p.eps = a[0].eps;
     if (scratch == nullptr) {
