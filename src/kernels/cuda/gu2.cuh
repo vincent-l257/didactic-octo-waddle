@@ -328,6 +328,74 @@ __device__ __forceinline__ void pair(const uint8_t* blob, int row, int e0, int e
     }
 }
 
+// rows2 with a half-warp a row: lane j of half h takes calls j, j + 32, j + 64 and j + 16, j + 48 of row r + h,
+// one call at a time - the sums lanes j and j + 16 of rows2's warp hold before its xor-16 step, added as that step
+// adds them, then the steps 8..1 inside the half.  The same bits; one call's words live at a time.
+template<int TY, int NC>
+__device__ __forceinline__ void rows_half(const uint8_t* rowA, int row_bytes, int r, int e, int n,
+                                          const int32_t* __restrict__ ent_tok, const block_q8_1* __restrict__ xq,
+                                          float* __restrict__ dst, int n_ff, const uint32_t* grid, int lane) {
+    using F = Fmt2<TY>;
+    const int h = lane >> 4, j = lane & 15;
+    const uint8_t* row = rowA + h * row_bytes;
+    const block_q8_1* xc[NC];
+#pragma unroll
+    for (int c = 0; c < NC; ++c) xc[c] = xq + (size_t) ent_tok[e + min(c, n - 1)] * 80;
+    float lo[NC], hi[NC];
+#pragma unroll 1
+    for (int i = 0; i < 5; ++i) {
+        const int k = j + (i < 3 ? 32 * i : 32 * i - 80);
+        const typename F::W w = F::load(row, k, grid);
+#pragma unroll
+        for (int c = 0; c < NC; ++c) {
+            if (c < n) {
+                float d, f;
+                F::apply(w, xc[c] + k, d, f);
+                if (i == 0) lo[c] = __fmaf_rn(d, f, 0.0f);
+                else if (i < 3) lo[c] = __fmaf_rn(d, f, lo[c]);
+                else if (i == 3) hi[c] = __fmaf_rn(d, f, 0.0f);
+                else hi[c] = __fmaf_rn(d, f, hi[c]);
+            }
+        }
+    }
+#pragma unroll
+    for (int c = 0; c < NC; ++c) {
+        if (c < n) {
+            float v = __fadd_rn(lo[c], hi[c]);
+#pragma unroll
+            for (int o = 8; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+            if (j == c) dst[(size_t) (e + c) * n_ff + r + h] = v;
+        }
+    }
+}
+
+// pair on rows_half, three entries a pass
+template<int TY>
+__device__ __forceinline__ void pair_half(const uint8_t* blob, int row, int e0, int e1, const int32_t* __restrict__ ent_tok,
+                                          const block_q8_1* __restrict__ xq, const NativeExpertLayout& L,
+                                          float* __restrict__ gate, float* __restrict__ up, const uint32_t* grid,
+                                          int lane) {
+    const bool is_up = row >= L.n_ff;
+    const int r = is_up ? row - (int) L.n_ff : row;
+    const uint8_t* wr = blob + (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
+    float* dst = is_up ? up : gate;
+    const int n_ff = (int) L.n_ff, rb = (int) L.gu_row;
+    for (int e = e0; e < e1;) {
+        const int n = e1 - e;
+        if (n == 1) {
+            rows_half<TY, 1>(wr, rb, r, e, 1, ent_tok, xq, dst, n_ff, grid, lane);
+            e += 1;
+        } else if (n == 2) {
+            rows_half<TY, 2>(wr, rb, r, e, 2, ent_tok, xq, dst, n_ff, grid, lane);
+            e += 2;
+        } else {
+            const int m = min(n, 3);
+            rows_half<TY, 3>(wr, rb, r, e, m, ent_tok, xq, dst, n_ff, grid, lane);
+            e += m;
+        }
+    }
+}
+
 }  // namespace gu2
 
 template<int TG> inline constexpr bool kGu2 = TG == 16 || TG == 17 || TG == 18 || TG == 21 || TG == 22;
@@ -335,9 +403,10 @@ template<int TG> inline constexpr bool kGu2 = TG == 16 || TG == 17 || TG == 18 |
 template<int TG> inline constexpr bool kGu2Q2 = kGu2<TG> || TG == 42;
 constexpr int GU2_ROWS = 16;   // rows per block: two a warp
 
-// native_gu_multi_kernel's rows, GU2_ROWS a block; the same group stride
+// native_gu_multi_kernel's rows, GU2_ROWS a block; the same group stride.  Four blocks an SM: the rows' loads are
+// latency-bound and the half-warp rows fit in 64 registers.
 template<int TG>
-__global__ void __launch_bounds__(256) native_gu2_kernel(const unsigned long long* __restrict__ grp_ptr,
+__global__ void __launch_bounds__(256, 4) native_gu2_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                          const int32_t* __restrict__ grp_start,
                                                          const int32_t* __restrict__ n_groups,
                                                          const int32_t* __restrict__ ent_tok,
@@ -355,8 +424,8 @@ __global__ void __launch_bounds__(256) native_gu2_kernel(const unsigned long lon
     const int row = blockIdx.x * GU2_ROWS + 2 * warp;          // rows row, row + 1: both gate or both up
     if (row >= 2 * L.n_ff) return;
     for (int g = blockIdx.y; g < ng; g += gridDim.y)
-        gu2::pair<TG>((const uint8_t*) grp_ptr[g], row, grp_start[g], grp_start[g + 1], ent_tok, xq, L, gate, up, s_grid,
-                      lane);
+        gu2::pair_half<TG>((const uint8_t*) grp_ptr[g], row, grp_start[g], grp_start[g + 1], ent_tok, xq, L, gate, up,
+                           s_grid, lane);
 }
 
 // whether native_gu2_kernel takes L's gate/up rows: 2560 values a row (80 calls), an even n_ff, 4-byte aligned rows
