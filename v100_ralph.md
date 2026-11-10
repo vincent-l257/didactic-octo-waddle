@@ -116,13 +116,14 @@ variants are dead code on 3090/V100); native_mmvq upstream layout (no faster: 1.
   (serve2_iq3_v100build.bat, auto split 0-22 / 23-47, 44% of experts in RAM), long400: 1271 / 70.9. Three cards:
   1581 / ~100. Three cards only run on Windows (driver); the user's headless Linux two-card is faster than Windows
   two-card (numbers not shared).
-Specs (V100 / 3090): FP32 14/36 TF; FP16 TC ~112/~71; dp4a ~56/~284 TC; 900/936 GB/s. V100 wins only on fp16 TC.
 Decode 11-09 (IQ4_XS 10,29, 18k; V100 10.52 ms/window, 87.6 tok/s; 250/350/300 W; benches `<scratchpad>/gt/`):
 - Done: hc8 read rewrite (-0.84 ms), native_gu_multi_kernel 4 blocks/SM on sm_70 (IQ4_XS gate/up 101 -> 81 us, -0.12).
 - Done, bitwise: Q5_0 Split (down took the per-entry kernel: 2 tokens an expert 101 -> 74 us V100, 82 -> 55 3090);
   gu2 a half-warp a row, 64 regs (IQ3_XXS gu 84 -> 74 us); hc8 down slice padded in smem (-1.3 us a read). Window
   25.60 -> 25.07 ms. Down below cc 9: 3 entries a pass, 4 blocks/SM (IQ4_NL 59 -> 48 us; V100 10.30 ms, window 24.53 ms, 89.6 t/s). No gain:
-  IQ4_XS on gu2 or 3 a pass; hc8 in one launch (-1 us a read); IQ3_XXS lookups (8 us); Q6_K mmvq at 6-8 blocks/SM.
+  IQ4_XS on gu2 or 3 a pass; hc8 in one launch (-1 us a read); IQ3_XXS lookups (8 us); Q6_K mmvq at 6-8 blocks/SM;
+  SwiGLU in down (+0.3 ms: 80 blocks redo it); q8_1 rows in hc8 up (text changed, cause not found). Device tail on for
+  Q5_0 down (DM_D_FMTS + DM_PAIRS): no host plan wait on CUDA0/1, window 24.53 -> 23.96 ms profiled.
 - Dense: the UD pack's projections run Q6_K (its GGUF section; 86 launches/window). T=3 at 1.8x the HBM floor (qkv 47
   vs 27 us). Tried, bitwise, no gain: activations in smem + warp per row, int->float by magic add, 2-4 rows a warp
   sharing activation loads (+8% at best). Next is a numerics change (fp16 HMMA): ~0.3-0.5 ms. Q8_0 at 1.15-1.3x floor.
