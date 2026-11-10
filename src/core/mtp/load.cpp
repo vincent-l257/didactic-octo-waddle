@@ -247,7 +247,9 @@ bool MtpDrafter::load(const MtpFiles& files, const ModelGeometry& g, SessionStat
             for (int64_t i = 0; i < cap_; ++i) id[(size_t) (t * (uint64_t) cap_ + (uint64_t) i)] = (int32_t) i;
         cudaMemcpy(ident_, id.data(), id.size() * 4, cudaMemcpyHostToDevice);
     }
-    const int prio = 0;
+    // the highest priority: the stages' commit graphs run beside the draft on this card
+    int least = 0, prio = 0;
+    cudaDeviceGetStreamPriorityRange(&least, &prio);
     if (cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, prio) != cudaSuccess) { err = "mtp: stream"; return false; }
     if (cudaStreamCreateWithPriority(&cs2_, cudaStreamNonBlocking, prio) != cudaSuccess ||
         cudaEventCreateWithFlags(&ev_fork_, cudaEventDisableTiming) != cudaSuccess ||
