@@ -1981,8 +1981,8 @@ __device__ __forceinline__ void red_release_add_gpu(unsigned int* p, unsigned in
 #define DOWN40_LEAN 0
 #endif
 
-// native_down_kernel with the entries taken GRP_NC at a time.  DEP: launched as a programmatic dependent - the
-// block's first group's weight rows are prefetched into L2 before the wait (and, for IQ4_NL, loaded into registers).
+// native_down_kernel with the entries taken GRP_NC at a time.  DEP: launched as a programmatic dependent - from cc 9
+// the block's first group's weight rows are prefetched into L2 before the wait (and, for IQ4_NL, loaded into registers).
 template<int TD, bool DEP = false>
 __global__ void __launch_bounds__(256, (kDown40<TD> && DOWN40_LEAN) ? 4 : 1) native_down_multi_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                                 const int32_t* __restrict__ grp_start,
@@ -2014,11 +2014,14 @@ __global__ void __launch_bounds__(256, (kDown40<TD> && DOWN40_LEAN) ? 4 : 1) nat
         }
     }
     if constexpr (DEP) {
+        // below cc 9 there is no programmatic launch: the prefetch would only delay the row loads
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900
         const int rows = L.n_ff == 640 ? (kDown40<TD> ? 32 : TD == 42 ? 16 : 8) : 8;
         const int r0 = blockIdx.x * rows, nr = min(rows, (int) L.n_embd - r0);
         const uint8_t* p = (const uint8_t*) grp_ptr[blockIdx.y] + L.down_off + (size_t) r0 * L.d_row;
         for (int o = threadIdx.x * 128; o < nr * (int) L.d_row; o += 256 * 128)
             asm volatile("prefetch.global.L2 [%0];" ::"l"(p + o));
+#endif
         pdl_wait();
         pdl_launch_dependents();   // the tail wait may start polling the tiers once every block is past its wait
     }
