@@ -1438,7 +1438,7 @@ __global__ void __launch_bounds__(256, GU_MULTI_MINB) native_gu_multi_kernel(con
                 float s2[2];
                 row_dot_multi<TG, 2, true, STAGE_GRID>(wr, xq, off2, 2, nb, lane, s2, s_grid);
                 tail_scale<TG>(s2, sc);
-                if (lane < 2) dst[(size_t) (e + lane) * L.n_ff + r] = s2[lane];
+                if (lane < 2) dst[(size_t) (e + lane) * L.n_ff + r] = lane == 0 ? s2[0] : s2[1];
             } else {
                 int off[GRP_NC];
 #pragma unroll
@@ -1507,7 +1507,7 @@ __global__ void __launch_bounds__(256) native_gu_multi_sx_kernel(const unsigned 
                     float s2[2];
                     row_dot_multi<TG, 2, true, STAGE_GRID>(wr, sx, off2, 2, nb, lane, s2, s_grid);
                     tail_scale<TG>(s2, sc);
-                    if (lane < 2) dst[(size_t) (e + lane) * L.n_ff + r] = s2[lane];
+                    if (lane < 2) dst[(size_t) (e + lane) * L.n_ff + r] = lane == 0 ? s2[0] : s2[1];
                 } else {
                     int off[GRP_NC];
 #pragma unroll
@@ -2155,7 +2155,7 @@ __global__ void __launch_bounds__(256, (kDown40<TD> && DOWN40_LEAN) ? 4 : 1) nat
                         float s2[2];
                         row_dot_multi<TD, 2, true>(wr, s_hq, off2, 2, nb, lane, s2);
                         tail_scale<TD>(s2, sc);
-                        if (lane < 2) out[(size_t) ent_dst[e + lane] * L.n_embd + r] = s2[lane];
+                        if (lane < 2) out[(size_t) ent_dst[e + lane] * L.n_embd + r] = lane == 0 ? s2[0] : s2[1];
                     } else {
                         int off[GRP_NC];
 #pragma unroll
