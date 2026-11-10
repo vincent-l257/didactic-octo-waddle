@@ -34,6 +34,7 @@ constexpr int SPC = GN / SL;           // slices per stream
 constexpr int NS = GN * GHC / SL;      // slices
 constexpr int SLW = SL / 256;          // 8-column words per lane and row
 constexpr int RG = 16;                 // rows per down CTA
+constexpr int SLP = SL + SL / 8;       // a slice in shared memory: 4 floats of padding per 32 columns
 
 struct Hc8Gr {
     const float* R[MT];
@@ -67,7 +68,8 @@ static_assert((NS * (MAX_LR + GHC) + NS) <= GN * GHC, "the scratch fits n_tok * 
 // by the up kernel, since it may be R itself); row group 0 also leaves the slice's sum of squares
 template <int NT>
 __global__ void __launch_bounds__(256) hc8_down2_kernel(Hc8Gr p, float* scr) {
-    __shared__ __align__(16) float xs[NT * SL];
+    // padded: the lanes' 8-column reads would otherwise meet two to a bank
+    __shared__ __align__(16) float xs[NT * SLP];
     __shared__ float red[8][NT];
     constexpr int RPW = RG / 8;
     const int s = blockIdx.x, rg = blockIdx.y, D = GN * GHC, nrows = p.lr + p.ninj;
@@ -105,7 +107,7 @@ __global__ void __launch_bounds__(256) hc8_down2_kernel(Hc8Gr p, float* scr) {
                 ss[t] = fmaf(v.x, v.x, ss[t]); ss[t] = fmaf(v.y, v.y, ss[t]);
                 ss[t] = fmaf(v.z, v.z, ss[t]); ss[t] = fmaf(v.w, v.w, ss[t]);
                 const float4 wn = *reinterpret_cast<const float4*>(p.w_norm + col0 + i);
-                *reinterpret_cast<float4*>(xs + t * SL + i) = make_float4(v.x * wn.x, v.y * wn.y, v.z * wn.z, v.w * wn.w);
+                *reinterpret_cast<float4*>(xs + t * SLP + i + (i >> 5) * 4) = make_float4(v.x * wn.x, v.y * wn.y, v.z * wn.z, v.w * wn.w);
             }
         }
     }
@@ -141,8 +143,8 @@ __global__ void __launch_bounds__(256) hc8_down2_kernel(Hc8Gr p, float* scr) {
             for (int b = 0; b < 4; ++b) { a[r][b] = s8(wv[r][i].x, b); a[r][4 + b] = s8(wv[r][i].y, b); }
 #pragma unroll
         for (int t = 0; t < NT; ++t) {
-            const float4 x0 = *reinterpret_cast<const float4*>(xs + t * SL + cl);
-            const float4 x1 = *reinterpret_cast<const float4*>(xs + t * SL + cl + 4);
+            const float4 x0 = *reinterpret_cast<const float4*>(xs + t * SLP + cl + (cl >> 5) * 4);
+            const float4 x1 = *reinterpret_cast<const float4*>(xs + t * SLP + cl + (cl >> 5) * 4 + 4);
 #pragma unroll
             for (int r = 0; r < RPW; ++r) {
                 float d = a[r][0] * x0.x;
