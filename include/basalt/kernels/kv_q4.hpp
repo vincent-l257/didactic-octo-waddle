@@ -46,6 +46,11 @@ void kv_append_q4_step(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, 
                        const float* kcur, const float* vcur, const QsaShapes& s, void* stream,
                        const KvHostPools* host = nullptr);
 
+/// n tokens' rows x [n, n_head_kv, 256] rotated in place (fwht256) and appended to one pool at each token's
+/// steps[t * kStepCount + kStepPos], VRAM only: fwht256_inplace_cuda then kv_append_q4_step per token, the same bits.
+void kv_rotate_append_q4(float* x, uint8_t* pool, const int32_t* page_table, const int32_t* steps, int n,
+                         const QsaShapes& s, void* stream);
+
 /// The prompt path: T consecutive (rotated) cells from pos0, K/V [T, n_head_kv, 256]; also into `stage` (identity
 /// layout, the one-layer staging pool of a streamed session) when given.
 void kv_append_q4(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, int64_t pos0, int64_t T, const float* K,

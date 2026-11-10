@@ -22,21 +22,12 @@ void check(const char* what) {
     }
 }
 
-// Fast Walsh-Hadamard Transform for N = 256: one warp per row, 8 values per lane in registers.
-// Orthonormal (scale 1/sqrt(256) = 1/16), so it is its own inverse.
-__global__ void fwht256_kernel(const float* __restrict__ src, float* __restrict__ dst, int64_t n_rows, float scale) {
+// Fast Walsh-Hadamard Transform for N = 256 of one row by one warp, 8 values per lane in registers (element
+// i * 32 + lane in reg[i]). Orthonormal (scale 1/sqrt(256) = 1/16), so it is its own inverse.
+__device__ __forceinline__ void fwht256_warp(const float* __restrict__ row_src, float scale, int lane, float (&reg)[8]) {
     constexpr int warp_size = 32;
     constexpr int N = 256;
     constexpr int el_w = N / warp_size;   // 8
-
-    const int64_t r = (int64_t) blockIdx.x * blockDim.y + threadIdx.y;
-    if (r >= n_rows) return;
-
-    const float* row_src = src + r * N;
-    float* row_dst = dst + r * N;
-
-    float reg[el_w];
-    const int lane = threadIdx.x;
 
 #pragma unroll
     for (int i = 0; i < el_w; ++i) reg[i] = row_src[i * warp_size + lane] * scale;
@@ -66,8 +57,17 @@ __global__ void fwht256_kernel(const float* __restrict__ src, float* __restrict_
             }
         }
     }
+}
+
+// one warp per row
+__global__ void fwht256_kernel(const float* __restrict__ src, float* __restrict__ dst, int64_t n_rows, float scale) {
+    const int64_t r = (int64_t) blockIdx.x * blockDim.y + threadIdx.y;
+    if (r >= n_rows) return;
+    const int lane = threadIdx.x;
+    float reg[8];
+    fwht256_warp(src + r * 256, scale, lane, reg);
 #pragma unroll
-    for (int i = 0; i < el_w; ++i) row_dst[i * warp_size + lane] = reg[i];
+    for (int i = 0; i < 8; ++i) dst[r * 256 + i * 32 + lane] = reg[i];
 }
 
 // One 32-value group in one warp (lane = element), ggml's q4_0: d = (the value of largest |x|) / -8,
@@ -115,6 +115,28 @@ __global__ void kv_append_q4_kernel(uint8_t* __restrict__ k_q4, uint8_t* __restr
     if (host.k_q4 != nullptr)
         q4_store(is_v ? host.v_q4 : host.k_q4, ((pos / page_size) * kv_heads + h) * page_size + (pos % page_size), b, t,
                  d, byte);
+}
+
+// n rows of one pool (row = token t * kv_heads + head, the token's cell at steps[t]): each rotated in place by one warp,
+// then its eight groups appended from the warp's registers - fwht256_kernel then kv_append_q4_kernel, the same bits
+__global__ void kv_rotate_append_q4_kernel(float* __restrict__ x, uint8_t* __restrict__ pool,
+                                           const int32_t* __restrict__ table, const int32_t* __restrict__ steps,
+                                           int n_rows, int kv_heads, int page_size, float scale) {
+    const int r = (int) blockIdx.x * (int) blockDim.y + (int) threadIdx.y;
+    if (r >= n_rows) return;
+    const int lane = threadIdx.x, t = r / kv_heads, h = r % kv_heads;
+    float reg[8];
+    fwht256_warp(x + (size_t) r * 256, scale, lane, reg);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) x[(size_t) r * 256 + i * 32 + lane] = reg[i];
+    const long long pos = (long long) __ldg(steps + (size_t) t * kStepCount + kStepPos);
+    const long long page = (long long) table[pos / page_size];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        uint8_t byte;
+        const uint16_t d = q4_group(reg[i], lane, byte);
+        if (page >= 0) q4_store(pool, (page * kv_heads + h) * page_size + (pos % page_size), i, lane, d, byte);
+    }
 }
 
 // The prompt path: grid (T, kv_heads, groups), K then V; also into the staging pool (identity layout) when given.
@@ -199,6 +221,17 @@ void kv_append_q4_step(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, 
     basalt::kernels::launch_cc(kv_append_q4_kernel, grid, 32, 0, (cudaStream_t) stream, k_q4, v_q4, page_table, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
         host ? *host : KvHostPools{});
     check("kv_append_q4 launch");
+}
+
+void kv_rotate_append_q4(float* x, uint8_t* pool, const int32_t* page_table, const int32_t* steps, int n,
+                         const QsaShapes& s, void* stream) {
+    if (n <= 0) return;
+    need_256(s, "kv_rotate_append_q4");
+    const int rows = n * (int) s.n_head_kv, rows_per_block = 4;
+    basalt::kernels::launch_cc(kv_rotate_append_q4_kernel, dim3((unsigned) ((rows + rows_per_block - 1) / rows_per_block)),
+                               dim3(32, rows_per_block), 0, (cudaStream_t) stream, x, pool, page_table, steps, rows,
+                               (int) s.n_head_kv, (int) s.page_size, 1.0f / 16.0f);
+    check("kv_rotate_append_q4 launch");
 }
 
 void kv_append_q4(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, int64_t pos0, int64_t T, const float* K,

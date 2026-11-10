@@ -159,9 +159,18 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
         dense_proj(32, wk->native_type, wk->native_data, v_.xq_, v_.kcur_, (int) N, (int) (NKV * HD), n, cs);
         dense_proj(32, wv->native_type, wv->native_data, v_.xq_, v_.vcur_, (int) N, (int) (NKV * HD), n, cs);
     }
+    // K8V4 in two launches, the same bits: K's norm, RoPE and INT8 rows with the indexer appends (V's INT8 half folded
+    // onto K, as kv_append_q8_step is called below), and V rotated into its Q4_0 rows
+    const bool hybrid_post = st.kv_hybrid && !v_.batch_rec_ && qsa_dec_fused_supported(s);
     if (fused_pre) {
         kv_post(kv_post_args(), cs);
         stamp(l, 8);
+    } else if (hybrid_post) {
+        QsaDecKvPost kp = kv_post_args();
+        kp.vcur = v_.kcur_; kp.v_q = st.k_q; kp.v_scale = st.k_scale; kp.host = KvHostPools{};
+        qsa_dec_kv_post(kp, n, s, rope_scaling(), cs);
+        stamp(l, 8);
+        kv_rotate_append_q4(v_.vcur_, st.v_q4, st.page_table, v_.step_, n, s, cs);
     } else {
         if (qb) norm_rope(v_.kcur_, wkn, (int) (n * NKV), (int) HD, pos_k);
         else for (int t = 0; t < T; ++t) norm_rope(v_.kcur_ + t * NKV * HD, wkn, (int) NKV, (int) HD, v_.pos_ + t * NH);
@@ -211,6 +220,9 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
         else for (int t = 0; t < T; ++t)
             bf16_gemv_fp32_mmvf(v_.mixed_ + t * N, (const uint16_t*) wiq->data, v_.qidx_ + t * IQ * ID, (int) N,
                                 (int) (IQ * ID), cs);
+        qsa_dec_q_post(q_post_args(), n, s, rope_scaling(), cs);
+    } else if (qb && !st.kv_rot && qsa_dec_fused_supported(s)) {   // the split, norms and RoPEs in one launch
+        bf16_gemv_fp32_mmvf_multi(v_.mixed_, N, (const uint16_t*) wiq->data, v_.qidx_, IQ * ID, N, IQ * ID, n, cs);
         qsa_dec_q_post(q_post_args(), n, s, rope_scaling(), cs);
     } else if (qb) {
         if (cudaMemcpy2DAsync(v_.qcur_, (size_t) HD * 4, v_.qfull_, (size_t) HD * 2 * 4,

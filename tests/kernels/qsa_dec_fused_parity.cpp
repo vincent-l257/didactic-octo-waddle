@@ -1,8 +1,10 @@
 // tests/kernels/qsa_dec_fused_parity.cpp - qsa_dec_kv_post / qsa_dec_q_post against the separate kernels the verify
 // window ran (norm, RoPE, tail copy, INT8 appends with a host copy, indexer appends; q split, norms, RoPEs), bitwise,
-// for windows of 1..8 rows at every block phase; then a microbench of both forms.
+// for windows of 1..8 rows at every block phase; the same for K8V4 (V rotated into Q4_0 by kv_rotate_append_q4); then
+// a microbench of both forms.
 //   qsa_dec_fused_parity [iters]
 #include "basalt/kernels/elementwise.hpp"
+#include "basalt/kernels/kv_q4.hpp"
 #include "basalt/kernels/kv_q8.hpp"
 #include "basalt/kernels/kv_stream.hpp"
 #include "basalt/kernels/native_qsa.hpp"
@@ -214,6 +216,147 @@ int main(int argc, char** argv) {
     }
     if (bad) ++g_fail;
     std::printf("%d windows, %lld cells: %s\n", windows, (long long) p, bad ? "FAIL" : "bitwise");
+    // ---- K8V4 (INT8 K, rotated Q4_0 V): the verify window's separate kernels against kv_post with V's INT8 half folded
+    // onto K, kv_rotate_append_q4 and q_post; the same windows from a cleared state
+    {
+        const size_t q4b = rows * (HD / 32) * 18;
+        uint8_t* v4[2] = {dalloc<uint8_t>(q4b), dalloc<uint8_t>(q4b)};
+        float* vh[2] = {dalloc<float>((size_t) MT * NKV * HD), dalloc<float>((size_t) MT * NKV * HD)};
+        for (State& x : st) {
+            ck(cudaMemset(x.kq, 0, rows * HD), "clear");
+            ck(cudaMemset(x.ks, 0, rows * HD / 64 * 2), "clear");
+            ck(cudaMemset(x.tail, 0, TS * 4), "clear");
+            ck(cudaMemset(x.dead, 0, ID * 4), "clear");
+            ck(cudaMemset(x.pooled, 0, (size_t) (max_cells / 4 + 2) * ID * 4), "clear");
+            ck(cudaMemset(x.snap, 0, TS * 4), "clear");
+            ck(cudaMemset(x.bpos, 0, 4), "clear");
+        }
+        auto run_h = [&](int which, int n) {
+            State& x = st[which];
+            float* kc = kcur[which];
+            const int32_t* pos_q = pos;
+            const int32_t* pos_k = pos + MT * NH;
+            const int32_t* pos_i = pos + MT * (NH + NKV);
+            if (which == 0) {
+                k::native_qsa_rms_norm_weighted(kc, knorm, kc, HD, n * NKV, 1e-6f, cs);
+                k::native_rope_apply(kc, kc, n * NKV, HD, 64, sc, pos_k, cs);
+                k::fwht256_inplace_cuda(vh[0], (int64_t) n * NKV, cs);
+                k::copy_from_mapped(x.snap, x.tail, TS, cs);
+                for (int t = 0; t < n; ++t) {
+                    k::kv_append_q8_step(x.kq, x.kq, x.ks, x.ks, d_table, steps + t * k::kStepCount, kc + t * NKV * HD,
+                                         kc + t * NKV * HD, s, cs, nullptr);
+                    k::kv_append_q4_step(v4[0], v4[0], d_table, steps + t * k::kStepCount, vh[0] + t * NKV * HD,
+                                         vh[0] + t * NKV * HD, s, cs, nullptr);
+                }
+                const k::QsaIndexerBuffers ib{x.tail, x.dead, x.pooled, x.bpos};
+                for (int t = 0; t < n; ++t)
+                    k::native_qsa_indexer_append(raw + t * ID, steps + t * k::kStepCount + k::kStepPos, 0, iknorm, 1e-6f,
+                                                 ib, s, max_cells, sc, cs);
+                ck(cudaMemcpy2DAsync(qcur[0], (size_t) HD * 4, qfull, (size_t) HD * 2 * 4, (size_t) HD * 4,
+                                     (size_t) (n * NH), cudaMemcpyDeviceToDevice, cs), "split");
+                k::native_qsa_rms_norm_weighted(qcur[0], qnorm, qcur[0], HD, n * NH, 1e-6f, cs);
+                k::native_rope_apply(qcur[0], qcur[0], n * NH, HD, 64, sc, pos_q, cs);
+                k::native_qsa_rms_norm_weighted(qidx[0], iqnorm, qidx[0], ID, n * IQ, 1e-6f, cs);
+                k::native_rope_apply(qidx[0], qidx[0], n * IQ, ID, 64, sc, pos_i, cs);
+            } else {
+                k::QsaDecKvPost a;
+                a.kcur = kc; a.vcur = kc; a.pos_k = pos_k; a.k_norm = knorm; a.steps = steps;
+                a.k_q = x.kq; a.v_q = x.kq; a.k_scale = x.ks; a.v_scale = x.ks; a.page_table = d_table;
+                a.idx_raw = raw; a.idx_k_norm = iknorm; a.tail = x.tail; a.dead = x.dead; a.pooled = x.pooled;
+                a.block_pos = x.bpos; a.tail_snap = x.snap; a.max_cells = max_cells; a.eps = 1e-6f;
+                k::qsa_dec_kv_post(a, n, s, sc, cs);
+                k::kv_rotate_append_q4(vh[1], v4[1], d_table, steps, n, s, cs);
+                k::QsaDecQPost b;
+                b.q_full = qfull; b.qcur = qcur[1]; b.pos_q = pos_q; b.q_norm = qnorm; b.q_idx = qidx[1]; b.pos_i = pos_i;
+                b.idx_q_norm = iqnorm; b.eps = 1e-6f;
+                k::qsa_dec_q_post(b, n, s, sc, cs);
+            }
+        };
+        int64_t ph = 0;
+        int wh = 0;
+        size_t badh = 0;
+        for (int rep = 0; rep < 40 && ph + 8 < max_cells; ++rep) {
+            for (int n : ns) {
+                if (ph + n >= max_cells) break;
+                std::vector<int32_t> hs((size_t) MT * k::kStepCount), hp((size_t) MT * (NH + NKV + IQ));
+                for (int t = 0; t < n; ++t) {
+                    k::qsa_step_fill(hs.data() + t * k::kStepCount, ph + t, s);
+                    for (int h = 0; h < NH; ++h) hp[t * NH + h] = (int32_t) (ph + t);
+                    for (int h = 0; h < NKV; ++h) hp[MT * NH + t * NKV + h] = (int32_t) (ph + t);
+                    for (int h = 0; h < IQ; ++h) hp[MT * (NH + NKV) + t * IQ + h] = (int32_t) (ph + t);
+                }
+                up(steps, hs);
+                up(pos, hp);
+                rnd(kcur0, (size_t) n * NKV * HD, 1.5f);
+                rnd(vcur, (size_t) n * NKV * HD, (rep % 5 == 0) ? 1e-3f : 1.0f);
+                rnd(raw, (size_t) n * ID, 2.0f);
+                rnd(qfull, (size_t) n * NH * 2 * HD, 1.2f);
+                rnd(qidx0, (size_t) n * IQ * ID, 1.2f);
+                for (int w = 0; w < 2; ++w) {
+                    cpy(kcur[w], kcur0, (size_t) n * NKV * HD);
+                    cpy(vh[w], vcur, (size_t) n * NKV * HD);
+                    cpy(qidx[w], qidx0, (size_t) n * IQ * ID);
+                    run_h(w, n);
+                }
+                ck(cudaStreamSynchronize(cs), "sync");
+                {   // the rows this window wrote
+                    const size_t nr = (size_t) n * NKV * HD;
+                    auto a = down(kcur[0], nr), b = down(kcur[1], nr);
+                    badh += ndiff(a.data(), b.data(), nr);
+                    a = down(vh[0], nr); b = down(vh[1], nr);
+                    badh += ndiff(a.data(), b.data(), nr);
+                    a = down(qcur[0], (size_t) n * NH * HD); b = down(qcur[1], (size_t) n * NH * HD);
+                    badh += ndiff(a.data(), b.data(), a.size());
+                    a = down(qidx[0], (size_t) n * IQ * ID); b = down(qidx[1], (size_t) n * IQ * ID);
+                    badh += ndiff(a.data(), b.data(), a.size());
+                }
+                ++wh;
+                ph += n;
+            }
+        }
+        if (badh) std::printf("  K8V4 rows (kcur, rotated V, qcur, q_idx): %zu differ\n", badh);
+        size_t before = badh;
+        auto cmph = [&](const char* what, size_t d) {
+            if (d) std::printf("  K8V4 %s: %zu differ\n", what, d);
+            badh += d;
+        };
+        auto a8 = down(st[0].kq, rows * HD), b8 = down(st[1].kq, rows * HD);
+        cmph("k codes", ndiff(a8.data(), b8.data(), a8.size()));
+        auto a16 = down(st[0].ks, rows * HD / 64), b16 = down(st[1].ks, rows * HD / 64);
+        cmph("k scales", ndiff(a16.data(), b16.data(), a16.size()));
+        auto au = down(v4[0], q4b), bu = down(v4[1], q4b);
+        cmph("v q4_0 blocks", ndiff(au.data(), bu.data(), au.size()));
+        auto af = down(st[0].pooled, (size_t) (max_cells / 4 + 2) * ID), bf = down(st[1].pooled, (size_t) (max_cells / 4 + 2) * ID);
+        cmph("pooled", ndiff(af.data(), bf.data(), af.size()));
+        af = down(st[0].tail, TS); bf = down(st[1].tail, TS);
+        cmph("tail", ndiff(af.data(), bf.data(), af.size()));
+        af = down(st[0].snap, TS); bf = down(st[1].snap, TS);
+        cmph("tail snapshot", ndiff(af.data(), bf.data(), af.size()));
+        af = down(st[0].dead, ID); bf = down(st[1].dead, ID);
+        cmph("dead", ndiff(af.data(), bf.data(), af.size()));
+        auto ai = down(st[0].bpos, 1), bi = down(st[1].bpos, 1);
+        cmph("block_pos", ndiff(ai.data(), bi.data(), 1));
+        (void) before;
+        if (badh) ++g_fail;
+        std::printf("K8V4: %d windows, %lld cells: %s\n", wh, (long long) ph, badh ? "FAIL" : "bitwise");
+        for (int n : {1, 2, 3, 4, 8}) {
+            float ms[2] = {0, 0};
+            cudaEvent_t e0, e1;
+            cudaEventCreate(&e0);
+            cudaEventCreate(&e1);
+            for (int w = 0; w < 2; ++w) {
+                for (int rep = 0; rep < 2; ++rep) {
+                    cudaEventRecord(e0, cs);
+                    for (int it = 0; it < iters; ++it) run_h(w, n);
+                    cudaEventRecord(e1, cs);
+                    cudaEventSynchronize(e1);
+                    cudaEventElapsedTime(&ms[w], e0, e1);
+                }
+            }
+            std::printf("K8V4 n %d: separate kernels %7.2f us | fused %6.2f us | %.2fx\n", n, 1e3 * ms[0] / iters,
+                        1e3 * ms[1] / iters, ms[0] / ms[1]);
+        }
+    }
     // microbench: a window of n rows at a block-completing position
     for (int n : {1, 2, 3, 4, 8}) {
         float ms[2] = {0, 0};
