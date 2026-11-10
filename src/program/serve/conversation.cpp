@@ -69,13 +69,19 @@ uint64_t conversation_identity(const Options& o, const basalt::core::ModelGeomet
 
 // finishes the in-flight host copy; a failed one drops its checkpoint
 void Runtime::ckd_finish() {
-    const void* dst = ckd.pending();
-    if (dst == nullptr) return;
-    std::string ce;
-    if (ckd.finish(ce)) return;
-    basalt::log::error("basalt serve", "%s", ce.c_str());
-    checks.erase(std::remove_if(checks.begin(), checks.end(),
-                                [&](const ConvCheckpoint& k) { return k.gdn.data() == dst; }), checks.end());
+    auto one = [&](basalt::core::ConversationCheckpointDeferral& d, int part) {
+        const void* dst = d.pending();
+        if (dst == nullptr) return;
+        std::string ce;
+        if (d.finish(ce)) return;
+        basalt::log::error("basalt serve", "%s", ce.c_str());
+        checks.erase(std::remove_if(checks.begin(), checks.end(), [&](const ConvCheckpoint& k) {
+            return (part < 0 ? k.gdn.data() : (size_t) part < k.stage_parts.size() ? k.stage_parts[(size_t) part].gdn.data()
+                                                                                    : nullptr) == dst;
+        }), checks.end());
+    };
+    one(ckd, -1);
+    for (size_t i = 0; i < st_ckd.size(); ++i) one(*st_ckd[i], (int) i);
 }
 
 // Whether the disk tier needs no new copy of a conversation: it is short (below the disk's minimum, or below
@@ -285,14 +291,18 @@ bool Runtime::checkpoint_at(int64_t L, std::vector<ConvCheckpoint>* parts, bool 
     } else {
         if (!gpu_sync_ok()) return false;
         std::string ce;
-        if (defer && stages.empty()) {
+        if (defer) {
             if (!ckd.save(c, *rsp, g, ce)) { basalt::log::error("basalt serve", "checkpoint save: %s", ce.c_str()); return false; }
         } else if (!checkpoint_save(c, *rsp, g)) return false;
-        for (auto& st : stages) {   // a layer split's later stages: their sessions' part
-            const basalt::core::OnDevice on(st->dev);
+        for (size_t i = 0; i < stages.size(); ++i) {   // a layer split's later stages: their sessions' part
+            GpuStage& st = *stages[i];
+            const basalt::core::OnDevice on(st.dev);
             ConvCheckpoint part;
             part.ids = c.ids;
-            if (!gpu_sync_ok() || !checkpoint_save(part, st->ss, g)) return false;
+            if (!gpu_sync_ok()) return false;
+            if (defer && i < st_ckd.size()) {
+                if (!st_ckd[i]->save(part, st.ss, g, ce)) { basalt::log::error("basalt serve", "checkpoint save: %s", ce.c_str()); return false; }
+            } else if (!checkpoint_save(part, st.ss, g)) return false;
             c.stage_parts.push_back(std::move(part));
         }
     }
@@ -304,7 +314,10 @@ bool Runtime::checkpoint_at(int64_t L, std::vector<ConvCheckpoint>* parts, bool 
         for (const ConvCheckpoint& k : checks) stamps.push_back(k.used);
         const size_t victim = basalt::program::conv_cache::eviction_victim(stamps.data(), stamps.size(),
                                                                            o.prompt_cache);
-        if (checks[victim].gdn.data() == ckd.pending()) ckd_finish();
+        bool pending = checks[victim].gdn.data() == ckd.pending();
+        for (size_t i = 0; i < st_ckd.size() && i < checks[victim].stage_parts.size(); ++i)
+            pending = pending || checks[victim].stage_parts[i].gdn.data() == st_ckd[i]->pending();
+        if (pending) ckd_finish();
         checks.erase(checks.begin() + (std::ptrdiff_t) victim);
     }
     return true;
@@ -553,10 +566,16 @@ int Runtime::init_conversations() {
             std::memset(warm.gdn.data(), 0, warm.gdn.size());
             if (ss.ple_hist) { warm.ple.resize(zw.ple); std::memset(warm.ple.data(), 0, warm.ple.size()); }
         }
-        if (o.prompt_cache > 0 && !multi_gpu) {
+        if (o.prompt_cache > 0 && (!multi_gpu || !stages.empty())) {
             std::string ce;
             if (!ckd.reserve(zw.gdn, ce))
                 basalt::log::warn("basalt serve", "deferred checkpoint copy off: %s", ce.c_str());
+            for (auto& st : stages) {
+                const basalt::core::OnDevice on(st->dev);
+                st_ckd.push_back(std::make_unique<basalt::core::ConversationCheckpointDeferral>());
+                if (!st_ckd.back()->reserve(conv_state_sizes(g, st->ss).gdn, ce))
+                    basalt::log::warn("basalt serve", "CUDA%d: deferred checkpoint copy off: %s", st->dev, ce.c_str());
+            }
         }
     }
 

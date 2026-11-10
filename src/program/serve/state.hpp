@@ -236,6 +236,7 @@ private:
     // A turn-boundary checkpoint's GDN bytes reach the host after the first token (see the deferral class); this
     // is declared after `checks` so it is destroyed, and its copy finished, before the checkpoints are.
     basalt::core::ConversationCheckpointDeferral ckd{};
+    std::vector<std::unique_ptr<basalt::core::ConversationCheckpointDeferral>> st_ckd{};   // a layer split's stages'
     bool cvec_cached{};
     std::vector<basalt::core::SessionState> rviews{};
     basalt::core::SessionState* rsp{};
