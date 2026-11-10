@@ -901,6 +901,14 @@ target_include_directories(router_top10_parity PRIVATE ${_gpu_include_directorie
 target_link_libraries(router_top10_parity PRIVATE kernels ${_gpu_runtime_target})
 basalt_gpu_test(NAME router_top10_parity COMMAND router_top10_parity --selftest)
 
+# the verify window's router (2560 -> 512 GEMV, top 10) against the one-token kernels bitwise and a CPU reference
+# (GPU, synthetic, no model; --bench times the two launches at 1..4 rows)
+add_executable(native_router_parity tests/kernels/native_router_parity.cpp)
+target_include_directories(native_router_parity PRIVATE ${_gpu_include_directories})
+target_link_libraries(native_router_parity PRIVATE kernels ${_gpu_runtime_target})
+basalt_gpu_test(NAME native_router_parity COMMAND native_router_parity)
+set_tests_properties(native_router_parity PROPERTIES SKIP_RETURN_CODE 77)
+
 add_executable(s_gemv_parity tests/kernels/s_gemv_parity.cpp)
 target_include_directories(s_gemv_parity PRIVATE ${_gpu_include_directories})
 target_link_libraries(s_gemv_parity PRIVATE kernels ${_gpu_runtime_target})
