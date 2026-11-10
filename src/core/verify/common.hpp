@@ -1,5 +1,7 @@
 #pragma once
 
+#include <initializer_list>
+
 #include "basalt/core/verify.hpp"
 #include "basalt/core/peer_experts.hpp"
 #include "basalt/kernels/qsa.hpp"
@@ -60,7 +62,16 @@ inline bool native_of(const WeightRef* w, const std::string& name, std::string& 
 constexpr int kCommitBlocks = 32;
 extern bool g_commit_async;
 void note_fallback(const char* what, int a, int b);
+struct DenseOut {
+    int type, n_out;
+    const void* w;
+};
 void dense_proj(int bit, int type, const void* w, const void* xq, float* y, int n_in, int n_out, int n, void* s);
+// the same with xh, the fp16 rows of q6k_f16_prep or null: a projection q6k_f16 takes reads them instead
+void dense_proj(int bit, int type, const void* w, const void* xq, const void* xh, float* y, int n_in, int n_out, int n,
+                void* s);
+// x's fp16 rows in xh when any of the n_in -> n_out[i] projections (types, weights) takes q6k_f16, else null
+const void* dense_f16_rows(const float* x, void* xh, int n_in, int n, std::initializer_list<DenseOut> outs, void* s);
 double card_bandwidth(int dev);
 
 }  // namespace basalt::core::verify_detail

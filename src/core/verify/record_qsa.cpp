@@ -87,10 +87,13 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
                        qsa_qproj_half_supported(wq->native_type, wq->native_data, (int) N, (int) (NH * 2 * HD));
     // the indexer appends gate the scores, the K/V appends the attention chunks: each on its own branch,
     // joined after the query post, which runs beside them
+    const void* xh = nullptr;   // the query projection's fp16 rows (q6k_f16)
     if (qsaf_wide) {
         {
             PdlScope ps(pdl);   // after the hc read
             if (!read_q8) native_quantize_q8_1(xm, v_.xq_, (int) N, n, cs);
+            xh = dense_f16_rows(xm, v_.xh_, (int) N, n, {{wq->native_type, (int) (NH * 2 * HD), wq->native_data}},
+                                cs);
         }
         cudaEventRecord(v_.qev_[0], cs);
         for (cudaStream_t q : v_.qs_) cudaStreamWaitEvent(q, v_.qev_[0], 0);
@@ -139,7 +142,8 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
                 qsa_qproj_half(wq->native_type, wq->native_data, v_.xq_, v_.qfull_, (int) N, (int) (NH * 2 * HD), n, 0,
                                0, cs);
             else
-                dense_proj(8, wq->native_type, wq->native_data, v_.xq_, v_.qfull_, (int) N, (int) (NH * 2 * HD), n, cs);
+                dense_proj(8, wq->native_type, wq->native_data, v_.xq_, xh, v_.qfull_, (int) N, (int) (NH * 2 * HD), n,
+                           cs);
         }
         cudaStreamWaitEvent(cs, v_.qev_[4], 0);
         for (int i = 7; i <= 9; ++i) stamp(l, i);
@@ -160,6 +164,7 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
     {
         PdlScope ps(pdl);   // after the hc read, up to the K/V norms
         if (!read_q8) native_quantize_q8_1(xm, v_.xq_, (int) N, n, cs);
+        xh = dense_f16_rows(xm, v_.xh_, (int) N, n, {{wq->native_type, (int) (NH * 2 * HD), wq->native_data}}, cs);
         if (qb) bf16_gemv_fp32_mmvf_multi(v_.mixed_, N, (const uint16_t*) wik->data, idx_raw, ID, N, ID, n, cs);
         else for (int t = 0; t < T; ++t)
             bf16_gemv_fp32_mmvf(v_.mixed_ + t * N, (const uint16_t*) wik->data, idx_raw + t * ID, (int) N, (int) ID, cs);
@@ -209,7 +214,7 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
     stamp(l, 9);
     {
         PdlScope pq(pdl2 && fused_pre && qb);   // PDL2: after the K/V post kernel
-        dense_proj(8, wq->native_type, wq->native_data, v_.xq_, v_.qfull_, (int) N,
+        dense_proj(8, wq->native_type, wq->native_data, v_.xq_, xh, v_.qfull_, (int) N,
                    (int) (NH * 2 * HD), n, cs);
         if (fused_pre && qb)
             bf16_gemv_fp32_mmvf_multi(v_.mixed_, N, (const uint16_t*) wiq->data, v_.qidx_,

@@ -33,6 +33,7 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
     float* gate = v_.gate_L_ + (size_t) gi * MT * HV;
     float* beta = v_.beta_L_ + (size_t) gi * MT * HV;
     PdlScope ps(pdl);   // the layer's GDN kernels, after the hc read
+    const void* xh = nullptr;   // the qkv and z projections' fp16 rows (q6k_f16)
     if (gs_split) {   // CUDA0's key heads in place (dec_gdn_rec's head map); the peer's arrive in the combine
         const GsLayer& GL = v_.gs_layers_[(size_t) gi];
         const int C0 = (int) (C / HK * v_.gs_nk0_), Z0 = (int) (ZV / HK * v_.gs_nk0_);
@@ -65,10 +66,13 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
         cudaEventRecord(v_.ev_fork_, cs);
         cudaStreamWaitEvent(v_.sh_cs_, v_.ev_fork_, 0);
         PdlScope pz(pdl, true);
-        dense_proj(2, wg->native_type, wg->native_data, v_.xq_, v_.z_, (int) N, (int) ZV, n, v_.sh_cs_);
+        dense_proj(2, wg->native_type, wg->native_data, v_.xq_, xh, v_.z_, (int) N, (int) ZV, n, v_.sh_cs_);
         cudaEventRecord(v_.ev_join_, v_.sh_cs_);
     };
     if (!read_q8) native_quantize_q8_1(xm, v_.xq_, (int) N, n, cs);
+    xh = dense_f16_rows(xm, v_.xh_, (int) N, n,
+                        {{wqkv->native_type, (int) C, wqkv->native_data}, {wg->native_type, (int) ZV, wg->native_data}},
+                        cs);
     // qkv and z in one dense_tc_pair launch for every window width, then the
     // one-launch recurrence with the gated norm
     if (gdnf && !pair_ok)
@@ -103,10 +107,10 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
         cudaStreamWaitEvent(v_.sh_hi_, v_.ev_fork_, 0);
         {
             PdlScope pz(pdl, true);
-            dense_proj(2, wg->native_type, wg->native_data, v_.xq_, v_.z_, (int) N, (int) ZV, n, v_.sh_hi_);
+            dense_proj(2, wg->native_type, wg->native_data, v_.xq_, xh, v_.z_, (int) N, (int) ZV, n, v_.sh_hi_);
         }
         cudaEventRecord(v_.ev_join_, v_.sh_hi_);
-        dense_proj(1, wqkv->native_type, wqkv->native_data, v_.xq_, qkv, (int) N, (int) C, n, cs);
+        dense_proj(1, wqkv->native_type, wqkv->native_data, v_.xq_, xh, qkv, (int) N, (int) C, n, cs);
         stamp(l, 2);
         DecRecArgs ra;
         ra.state = state; ra.qkv = qkv; ra.conv_w = (const float*) wc->data; ra.x = xm;
@@ -126,7 +130,7 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
         goto gdn_done;
     }
     if (gdnf_fork && gdnf == 3) gdnf_z_side();
-    dense_proj(1, wqkv->native_type, wqkv->native_data, v_.xq_, qkv, (int) N, (int) C, n, cs);
+    dense_proj(1, wqkv->native_type, wqkv->native_data, v_.xq_, xh, qkv, (int) N, (int) C, n, cs);
     stamp(l, 2);
     if (gdnf) {
         DecRecArgs ra;
@@ -148,7 +152,7 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
             stamp(l, 6);
             dense_proj(4, wout->native_type, wout->native_data, v_.xq_, v_.bo_, (int) ZV, (int) N, n, cs);
         } else {
-            dense_proj(2, wg->native_type, wg->native_data, v_.xq_, v_.z_, (int) N, (int) ZV, n, cs);
+            dense_proj(2, wg->native_type, wg->native_data, v_.xq_, xh, v_.z_, (int) N, (int) ZV, n, cs);
             for (int i = 3; i <= 5; ++i) stamp(l, i);
             dec_gdn_rec(ra, n, cs);
             stamp(l, 6);
@@ -167,7 +171,7 @@ bool Verifier::WindowRecorder::gdn(int64_t l, const LayerView& v, bool read_q8, 
                  (const float*) wsa->data, gate, beta, (int) N, (int) HV,
                  n, cs);
     stamp(l, 4);
-    dense_proj(2, wg->native_type, wg->native_data, v_.xq_, v_.z_, (int) N, (int) ZV, n, cs);
+    dense_proj(2, wg->native_type, wg->native_data, v_.xq_, xh, v_.z_, (int) N, (int) ZV, n, cs);
     stamp(l, 5);
     // the recurrence from the untouched state over tokens [0, T); outputs only for this group's
     if (v_.batch_rec_) {   // each segment's recurrence from its own slot's state

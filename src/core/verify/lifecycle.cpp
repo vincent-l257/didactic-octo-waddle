@@ -8,6 +8,7 @@
 #include "basalt/core/on_device.hpp"
 #include "basalt/platform/compiler.hpp"
 #include "basalt/kernels/iq_kernels.hpp"
+#include "basalt/kernels/q6k_f16.hpp"
 #include "basalt/kernels/cpu/expert_layout.hpp"
 #include "basalt/kernels/cpu/pool.hpp"
 #include "basalt/kernels/fused_gr.hpp"
@@ -228,6 +229,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         inj_ = b.take<float>(T * HC); inj2_ = b.take<float>(T * HC);
         lo_ = b.take<float>(T * (uint64_t) g.hc_lr); rs_ = b.take<float>(T * HC); xn_ = b.take<float>(T * HC * N);
         xq_ = b.take<uint8_t>(basalt::kernels::native_q8_1_bytes(max_in, (int) T));
+        xh_ = b.take<uint8_t>(basalt::kernels::q6k_f16_bytes((int) N, (int) T));
         sh_xq_ = b.take<uint8_t>(basalt::kernels::native_q8_1_bytes(max_in, (int) T));
         qkv_L_ = b.take<float>(nG * T * C); h_L_ = b.take<float>(nG * T * C);
         gate_L_ = b.take<float>(nG * T * HV); beta_L_ = b.take<float>(nG * T * HV);
