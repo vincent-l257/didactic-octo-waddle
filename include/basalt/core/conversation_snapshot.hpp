@@ -71,6 +71,10 @@ public:
     const void* pending() const { return dst_; }
     /// Waits for the host copy; false if it failed (the checkpoint's gdn bytes are then unusable).
     bool finish(std::string& error);
+    /// conversation_checkpoint_restore, with the GDN state copied from the spare buffer when it still holds the
+    /// checkpoint's bytes (the last one saved through it).
+    bool restore(const ConversationCheckpoint& checkpoint, SessionState& session, const ModelGeometry& g,
+                 std::string& error) const;
 
 private:
     void* spare_ = nullptr;
@@ -79,9 +83,13 @@ private:
     std::thread worker_;
     const void* dst_ = nullptr;
     int status_ = 0;
+    const void* held_ = nullptr;         // the host bytes of the checkpoint the spare buffer holds
+    size_t held_n_ = 0;
+    std::vector<int32_t> held_ids_;
 };
+/// `gdn_device`: the GDN bytes from this device buffer instead of the checkpoint's host copy (the same bytes).
 bool conversation_checkpoint_restore(const ConversationCheckpoint& checkpoint, SessionState& session,
-                                     const ModelGeometry& g, std::string& error);
+                                     const ModelGeometry& g, std::string& error, const void* gdn_device = nullptr);
 
 struct ConversationView {
     const std::vector<int32_t>& ids;

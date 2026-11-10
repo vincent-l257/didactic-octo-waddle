@@ -138,7 +138,9 @@ inline constexpr double kPairFull = 0.70;   ///< the share of windows accepted w
 
 ConvStateSizes conv_state_sizes(const basalt::core::ModelGeometry& g, const basalt::core::SessionState& ss);
 bool checkpoint_save(ConvCheckpoint& c, const basalt::core::SessionState& ss, const basalt::core::ModelGeometry& g);
-bool checkpoint_restore(const ConvCheckpoint& c, basalt::core::SessionState& ss, const basalt::core::ModelGeometry& g);
+// `held`: the deferral that saved it, whose device copy may still hold its GDN bytes
+bool checkpoint_restore(const ConvCheckpoint& c, basalt::core::SessionState& ss, const basalt::core::ModelGeometry& g,
+                        const basalt::core::ConversationCheckpointDeferral* held = nullptr);
 uint64_t conversation_identity(const Options& o, const basalt::core::ModelGeometry& g);
 uint64_t fnv1a(const void* data, size_t n, uint64_t h = 1469598103934665603ull);
 void seed_usage_from_prompt(std::vector<float>& usage, const std::vector<uint32_t>& hist, int64_t tokens,

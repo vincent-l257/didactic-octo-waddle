@@ -29,9 +29,11 @@ bool checkpoint_save(ConvCheckpoint& c, const basalt::core::SessionState& ss, co
 }
 
 /// Puts a checkpoint's running state back; the positional cells below it are the caller's to guarantee.
-bool checkpoint_restore(const ConvCheckpoint& c, basalt::core::SessionState& ss, const basalt::core::ModelGeometry& g) {
+bool checkpoint_restore(const ConvCheckpoint& c, basalt::core::SessionState& ss, const basalt::core::ModelGeometry& g,
+                        const basalt::core::ConversationCheckpointDeferral* held) {
     std::string error;
-    if (basalt::core::conversation_checkpoint_restore(c, ss, g, error)) return true;
+    if (held != nullptr ? held->restore(c, ss, g, error) : basalt::core::conversation_checkpoint_restore(c, ss, g, error))
+        return true;
     basalt::log::error("basalt serve", "checkpoint restore: %s", error.c_str());
     return false;
 }

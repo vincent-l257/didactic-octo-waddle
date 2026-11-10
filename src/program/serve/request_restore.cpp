@@ -480,11 +480,12 @@ Flow Request::restore() {
         ConvCheckpoint* c = nullptr;
         for (ConvCheckpoint& k : runtime_.checks) if ((int64_t) k.ids.size() == resume) c = &k;
         if (c != nullptr) c->used = ++runtime_.check_clock;   // mounting through it is the use LRU counts
-        if (c == nullptr || !checkpoint_restore(*c, *runtime_.rsp, runtime_.g) || c->stage_parts.size() != runtime_.stages.size() ||
+        if (c == nullptr || !checkpoint_restore(*c, *runtime_.rsp, runtime_.g, &runtime_.ckd) || c->stage_parts.size() != runtime_.stages.size() ||
                    [&] {
                        for (size_t i = 0; i < runtime_.stages.size(); ++i) {
                            const basalt::core::OnDevice on(runtime_.stages[i]->dev);
-                           if (!checkpoint_restore(c->stage_parts[i], runtime_.stages[i]->ss, runtime_.g)) return true;
+                           if (!checkpoint_restore(c->stage_parts[i], runtime_.stages[i]->ss, runtime_.g,
+                                                   i < runtime_.st_ckd.size() ? runtime_.st_ckd[i].get() : nullptr)) return true;
                        }
                        return false;
                    }()) {

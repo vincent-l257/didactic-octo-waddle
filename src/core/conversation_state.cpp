@@ -226,6 +226,7 @@ bool ConversationCheckpointDeferral::save(ConversationCheckpoint& c, const Sessi
     if (dst_ && !finish(error)) return false;
     ConversationStateSizes z;
     if (!checkpoint_targets(ss, g, c.ids.size(), z, error)) return false;
+    held_ = nullptr;
     if (!spare_ || z.gdn > cap_ || !z.gdn) return conversation_checkpoint_save(c, ss, g, error);
     const size_t layers = owned_qsa(ss);
     c.gdn.resize(z.gdn); c.ple.resize(ss.ple_hist ? z.ple : 0);
@@ -241,6 +242,9 @@ bool ConversationCheckpointDeferral::save(ConversationCheckpoint& c, const Sessi
     int dev = 0;
     cudaGetDevice(&dev);
     dst_ = c.gdn.data();
+    held_ = dst_;
+    held_n_ = z.gdn;
+    held_ids_ = c.ids;
     status_ = cudaSuccess;
     worker_ = std::thread([this, dev, n = z.gdn] {
         cudaSetDevice(dev);
@@ -254,6 +258,7 @@ bool ConversationCheckpointDeferral::save(ConversationCheckpoint& c, const Sessi
 
 bool ConversationCheckpointDeferral::finish(std::string& error) {
     if (worker_.joinable()) worker_.join();
+    if (status_ != cudaSuccess) held_ = nullptr;
     dst_ = nullptr;
     if (status_ == cudaSuccess) return true;
     error = std::string("conversation checkpoint deferred copy: ") + cudaGetErrorString((cudaError_t) status_);
@@ -261,12 +266,19 @@ bool ConversationCheckpointDeferral::finish(std::string& error) {
     return false;
 }
 
+bool ConversationCheckpointDeferral::restore(const ConversationCheckpoint& c, SessionState& ss,
+                                             const ModelGeometry& g, std::string& error) const {
+    const bool held = spare_ != nullptr && held_ != nullptr && held_ == c.gdn.data() && held_n_ == c.gdn.size() &&
+                      held_ids_ == c.ids;
+    return conversation_checkpoint_restore(c, ss, g, error, held ? spare_ : nullptr);
+}
+
 bool conversation_checkpoint_restore(const ConversationCheckpoint& c, SessionState& ss,
-                                     const ModelGeometry& g, std::string& error) {
+                                     const ModelGeometry& g, std::string& error, const void* gdn_device) {
     if (!conversation_checkpoint_validate(c, ss, g, error)) return false;
     ConversationStateSizes z;
     if (!conversation_session_sizes(g, ss, z, error)) return false;
-    if (!copy(ss.gdn_state, c.gdn.data(), c.gdn.size(), error) ||
+    if (!copy(ss.gdn_state, gdn_device != nullptr ? gdn_device : c.gdn.data(), c.gdn.size(), error) ||
         !copy(ss.ple_hist, c.ple.data(), c.ple.size(), error)) return false;
     for (size_t j = 0; j < owned_qsa(ss); ++j) {
         const auto& st = owned(ss, j);
