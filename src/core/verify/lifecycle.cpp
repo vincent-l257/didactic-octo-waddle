@@ -97,6 +97,9 @@ Verifier::~Verifier() {
     if (ev_fin_fork_) cudaEventDestroy(ev_fin_fork_);
     if (ev_fin_join_) cudaEventDestroy(ev_fin_join_);
     if (fin_s_) cudaStreamDestroy(fin_s_);
+    if (ho_s_) cudaStreamDestroy(ho_s_);
+    if (ev_ho_fork_) cudaEventDestroy(ev_ho_fork_);
+    if (ev_ho_join_) cudaEventDestroy(ev_ho_join_);
     if (h_final_) cudaFreeHost(h_final_);
     if (arena_) cudaFree(arena_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_seq_, h_flag_, h_ymiss_, h_pend_,
@@ -334,6 +337,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
          cudaEventCreateWithFlags(&ev_fin_fork_, cudaEventDisableTiming) != cudaSuccess ||
          cudaEventCreateWithFlags(&ev_fin_join_, cudaEventDisableTiming) != cudaSuccess)) {
         err = "verify: final rows' host copy";
+        return false;
+    }
+    if (le_ < g.n_layers &&
+        (cudaStreamCreateWithPriority(&ho_s_, cudaStreamNonBlocking, cs_greatest) != cudaSuccess ||
+         cudaEventCreateWithFlags(&ev_ho_fork_, cudaEventDisableTiming) != cudaSuccess ||
+         cudaEventCreateWithFlags(&ev_ho_join_, cudaEventDisableTiming) != cudaSuccess)) {
+        err = "verify: hand-off stream create failed";
         return false;
     }
     *(volatile uint32_t*) h_pend_ = 0;

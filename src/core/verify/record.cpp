@@ -44,9 +44,10 @@ bool Verifier::WindowRecorder::run() {
     if (lz_open) cudaStreamWaitEvent(cs, v_.lz_join_, 0);
     if (v_.le_ < g.n_layers) {   // a layer split's earlier stage: hand the residual on, no head
         float* hout = v_.hand_out_ + (size_t) hrow0 * HB;
-        copy_from_mapped(hout, v_.R_, (int64_t) T * HC * N, cs);
+        if (!ho_open) copy_from_mapped(hout, v_.R_, (int64_t) T * HC * N, cs);
         copy_from_mapped(hout + (size_t) T * HC * N, v_.bo_, (int64_t) T * N, cs);
-        copy_from_mapped(hout + (size_t) T * (HC + 1) * N, v_.inj2_, (int64_t) T * HC, cs);
+        if (ho_open) cudaStreamWaitEvent(cs, v_.ev_ho_join_, 0);   // R and the inject rows, forked after the FFN read
+        else copy_from_mapped(hout + (size_t) T * (HC + 1) * N, v_.inj2_, (int64_t) T * HC, cs);
         if (!v_.batch_rec_ && v_.next_ != nullptr && v_.next_->m_flag_ != nullptr) signal_flag(v_.next_->m_flag_ + 12, 1, cs);
         return true;
     }

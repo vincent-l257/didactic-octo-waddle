@@ -634,6 +634,8 @@ private:
     float* h_final_ = nullptr;          // final_R_host's rows (portable pinned), a split's last stage only
     cudaStream_t fin_s_ = nullptr;
     cudaEvent_t ev_fin_fork_ = nullptr, ev_fin_join_ = nullptr;
+    cudaStream_t ho_s_ = nullptr;      // a split's earlier stage: the hand-off of the rows final before the MoE tail
+    cudaEvent_t ev_ho_fork_ = nullptr, ev_ho_join_ = nullptr;
     cudaEvent_t lz_fork_ = nullptr, lz_join_ = nullptr;
     bool lz_pending_ = false;                       ///< a commit whose lazy layers no window has applied yet
     bool finisher_on() const;                        ///< solo windows start with the finisher

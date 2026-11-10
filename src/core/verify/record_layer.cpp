@@ -271,6 +271,17 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
             gr_read_group(1, true, v_.inj_, v_.inj2_, sh_fork ? v_.sh_xq_ : v_.xq_);
         }
     }
+    // a split's earlier stage: R and the inject rows are final after its last FFN read (unless a control vector follows
+    // the combine), so their hand-off runs beside the MoE tail and only the block output's follows the combine
+    if (l == v_.le_ - 1 && v_.le_ < g.n_layers && v_.ho_s_ != nullptr && !cvec().covers(l)) {
+        float* hout = v_.hand_out_ + (size_t) hrow0 * HB;
+        cudaEventRecord(v_.ev_ho_fork_, cs);
+        cudaStreamWaitEvent(v_.ho_s_, v_.ev_ho_fork_, 0);
+        copy_from_mapped(hout, v_.R_, (int64_t) T * HC * N, v_.ho_s_);
+        copy_from_mapped(hout + (size_t) T * (HC + 1) * N, v_.inj2_, (int64_t) T * HC, v_.ho_s_);
+        cudaEventRecord(v_.ev_ho_join_, v_.ho_s_);
+        ho_open = true;
+    }
     if (sh_fork) {
         cudaEventRecord(v_.ev_fork_, cs);
         cudaStreamWaitEvent(sh_stream, v_.ev_fork_, 0);
