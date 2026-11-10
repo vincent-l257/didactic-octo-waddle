@@ -143,7 +143,8 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < hx.size(); i += 97) hx[i] *= 8.0f;
         std::vector<double> ref((size_t) 8 * c.n_out), wrow(c.n_in);
         for (int r = 0; r < c.n_out; ++r) {
-            for (int kb = 0; kb < bpr; ++kb) dequant_block(&hw[((size_t) r * bpr + kb) * 210], &wrow[(size_t) kb * 256]);
+            for (int kb = 0; kb < bpr; ++kb)
+                dequant_block(&hw[((size_t) r * bpr + kb) * 210], &wrow[(size_t) kb * 256]);
             for (int col = 0; col < 8; ++col) {
                 double a = 0;
                 for (int k = 0; k < c.n_in; ++k) a += wrow[k] * hx[(size_t) col * c.n_in + k];
@@ -155,11 +156,14 @@ int main(int argc, char** argv) {
         float *x = nullptr, *y = nullptr, *y8 = nullptr, *yq = nullptr;
         void *xh = nullptr, *xq = nullptr;
         bool alloc = true;
-        for (auto& p : w) alloc = alloc && ck(cudaMalloc(&p, wb), "weights") && ck(cudaMemcpy(p, hw.data(), wb, cudaMemcpyHostToDevice), "copy");
-        alloc = alloc && ck(cudaMalloc(&x, hx.size() * 4), "x") && ck(cudaMalloc(&xh, q6k_f16_bytes(c.n_in, 8)), "xh") &&
-                ck(cudaMalloc(&xq, native_q8_1_bytes(c.n_in, 8)), "xq") &&
-                ck(cudaMalloc(&y, (size_t) 8 * c.n_out * 4), "y") && ck(cudaMalloc(&y8, (size_t) 8 * c.n_out * 4), "y8") &&
-                ck(cudaMalloc(&yq, (size_t) 8 * c.n_out * 4), "yq");
+        for (auto& p : w)
+            alloc = alloc && ck(cudaMalloc(&p, wb), "weights") &&
+                    ck(cudaMemcpy(p, hw.data(), wb, cudaMemcpyHostToDevice), "copy");
+        const size_t yb = (size_t) 8 * c.n_out * 4;
+        alloc = alloc && ck(cudaMalloc(&x, hx.size() * 4), "x") &&
+                ck(cudaMalloc(&xh, q6k_f16_bytes(c.n_in, 8)), "xh") &&
+                ck(cudaMalloc(&xq, native_q8_1_bytes(c.n_in, 8)), "xq") && ck(cudaMalloc(&y, yb), "y") &&
+                ck(cudaMalloc(&y8, yb), "y8") && ck(cudaMalloc(&yq, yb), "yq");
         if (!alloc) return 1;
         cudaMemcpy(x, hx.data(), hx.size() * 4, cudaMemcpyHostToDevice);
         // a pageable copy can return before it lands; the work below runs on a non-blocking stream
@@ -204,7 +208,8 @@ int main(int argc, char** argv) {
                     q6k_f16(w[i % copies], xh, y, c.n_in, c.n_out, T, s);
                 });
                 const float tk = time_graph(s, [&](int i) { q6k_f16(w[i % copies], xh, y, c.n_in, c.n_out, T, s); });
-                const float tm = time_graph(s, [&](int i) { native_mmvq(14, w[i % copies], xq, yq, c.n_in, c.n_out, T, s); });
+                const float tm =
+                    time_graph(s, [&](int i) { native_mmvq(14, w[i % copies], xq, yq, c.n_in, c.n_out, T, s); });
                 std::printf("  | mmvq %.2f us (+q8_1 %.2f)  f16 %.2f us (+prep %.2f)  %+.0f%%", tm, tq, tk, tf,
                             100.0 * (tf - tq) / tq);
             }

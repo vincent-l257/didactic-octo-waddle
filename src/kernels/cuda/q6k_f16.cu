@@ -160,7 +160,8 @@ bool cc7_device() noexcept {
     static int ok[64] = {};
     if (ok[dev] == 0) {
         int major = 0;
-        const bool yes = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major == 7;
+        const bool yes =
+            cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major == 7;
         cudaGetLastError();
         ok[dev] = yes ? 1 : 2;
     }
