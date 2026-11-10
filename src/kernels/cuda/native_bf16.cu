@@ -121,6 +121,51 @@ __global__ void bf16_f32_mmvf_multi_kernel(const float* __restrict__ x, int64_t 
             if (k < n_tok) y[(size_t) k * ldy + blockIdx.x] = acc[k];
 }
 
+// bf16_f32_mmvf_multi_kernel with n_in = 2 * BLOCK_SIZE * NP and exactly NT rows: each thread loads its weight pairs
+// before its multiply-adds; every output's chain and reductions are the multi kernel's
+template <int BLOCK_SIZE, int NT, int NP>
+__global__ void __launch_bounds__(BLOCK_SIZE) bf16_f32_mmvf_fixed_kernel(const float* __restrict__ x, int64_t ldx,
+                                                                         const uint16_t* __restrict__ w,
+                                                                         float* __restrict__ y, int64_t ldy) {
+    constexpr int n_in = 2 * BLOCK_SIZE * NP;
+    pdl_wait();
+    const int t = threadIdx.x;
+    const uint32_t* weights2 = reinterpret_cast<const uint32_t*>(w + (size_t) blockIdx.x * n_in);
+    __shared__ float partials[NT][32];
+    if (t < 32)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) partials[k][t] = 0.0f;
+    uint32_t wp[NP];
+#pragma unroll
+    for (int p = 0; p < NP; ++p) wp[p] = weights2[t + p * BLOCK_SIZE];
+    float acc[NT];
+#pragma unroll
+    for (int k = 0; k < NT; ++k) acc[k] = 0.0f;
+#pragma unroll
+    for (int p = 0; p < NP; ++p) {
+        const float w0 = f32_from_bf16((uint16_t) wp[p]), w1 = f32_from_bf16((uint16_t) (wp[p] >> 16));
+#pragma unroll
+        for (int k = 0; k < NT; ++k) {
+            const float2 input = reinterpret_cast<const float2*>(x + (size_t) k * ldx)[t + p * BLOCK_SIZE];
+            acc[k] = __fmaf_rn(w0, input.x, acc[k]);
+            acc[k] = __fmaf_rn(w1, input.y, acc[k]);
+        }
+    }
+#pragma unroll
+    for (int k = 0; k < NT; ++k) acc[k] = mmvf_warp_sum(acc[k]);
+    __syncthreads();
+    if ((t & 31) == 0)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) partials[k][t / 32] = acc[k];
+    __syncthreads();
+    if (t < 32)
+#pragma unroll
+        for (int k = 0; k < NT; ++k) {
+            const float v = mmvf_warp_sum(partials[k][t]);
+            if (t == 0) y[(size_t) k * ldy + blockIdx.x] = v;
+        }
+}
+
 int mmvf_block_size(int64_t n_in) {
     int best = 32;
     int64_t best_iterations = (n_in + 63) / 64;
@@ -138,6 +183,21 @@ int mmvf_block_size(int64_t n_in) {
 
 void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy,
                                int64_t n_in, int64_t n_out, int n_tok, void* stream) {
+    // n_in 2560 (256 threads, five pairs each, as mmvf_block_size picks) and 1-4 rows: the fixed-length kernel
+    if (n_in == 2560 && n_tok >= 1 && n_tok <= 4 && n_out > 0 && n_out <= std::numeric_limits<int>::max() &&
+        (ldx & 1) == 0 && x != nullptr && w != nullptr && y != nullptr && (reinterpret_cast<uintptr_t>(x) & 7u) == 0 &&
+        (reinterpret_cast<uintptr_t>(w) & 3u) == 0 && (reinterpret_cast<uintptr_t>(y) & 3u) == 0) {
+        const cudaStream_t st = (cudaStream_t) stream;
+        const dim3 grid((unsigned) n_out), block(256);
+        if (n_tok == 1) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 1, 5>, grid, block, 0, st, x, ldx, w, y, ldy);
+        else if (n_tok == 2) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 2, 5>, grid, block, 0, st, x, ldx, w, y, ldy);
+        else if (n_tok == 3) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 3, 5>, grid, block, 0, st, x, ldx, w, y, ldy);
+        else launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 4, 5>, grid, block, 0, st, x, ldx, w, y, ldy);
+        const cudaError_t result = cudaGetLastError();
+        if (result != cudaSuccess)
+            throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
+        return;
+    }
     if (n_tok == 1 && ldy >= n_out) { bf16_gemv_fp32_mmvf(x, w, y, n_in, n_out, stream); return; }
     if (n_tok < 1 || n_tok > 8 || n_in <= 0 || (n_in & 1) != 0 || n_out <= 0 || (ldx & 1) != 0 || x == nullptr ||
         w == nullptr || y == nullptr || (reinterpret_cast<uintptr_t>(x) & 7u) != 0)
