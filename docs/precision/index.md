@@ -177,7 +177,9 @@ read that runs alone chunks as the single-stream path does; a read beside decodi
 capped loan allows, so the same prompt's K/V can differ in the last bits between the two. A read beside decoding slots
 that gives way to a shorter request reads its rest later in the same chunks, beside the slots, with no CPU share.
 A layer split caps the chunk at a quarter of the prompt, between 512 and 3,072 tokens, so its stages overlap; its
-prompts chunk differently from the `--prefill` setting and their K/V can differ in the last bits.
+prompts chunk differently from the `--prefill` setting and their K/V can differ in the last bits. Teacher-forced
+PPL, IQ4_XS on three cards, 20 chunks of 8,192 tokens (4,096-token prompts): 3.1870 with 8,192-token chunks, 3.1863
+with this rule; paired NLL difference -0.00025 (95% interval -0.0020 to +0.0015).
 
 **Short first chunk.** A prompt above the chunk cap (and at least 32,768 tokens) reads its first 16,384 tokens as one
 chunk and the rest in equal chunks of at most the cap, so the first chunk waits for fewer PLE rows. This moves the chunk
