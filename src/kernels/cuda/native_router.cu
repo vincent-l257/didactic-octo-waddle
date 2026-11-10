@@ -98,6 +98,94 @@ __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ id
     const float inverse_selected_sum = 1.0f / selected_sum;
     if (lane < 10) weights[lane] = selected * inverse_selected_sum;
 }
+// `route` for one token per warp, the same ids and weights bit for bit: the softmax is route's; the selection takes
+// the tenth largest lane maximum as a floor (at least ten values reach it, so the ten picks do), ranks every value at
+// or above it by the values ordered before it (probability descending, expert ascending), and each lane sums its
+// experts' picks in rank order as route's selection loop does.
+__launch_bounds__(32)
+__global__ void route_window(const float* __restrict__ logits, int32_t* __restrict__ ids,
+                             float* __restrict__ weights) {
+    __shared__ __align__(16) float s_max[32];
+    __shared__ float s_cv[512], s_sv[10];
+    __shared__ int32_t s_ci[512], s_si[10];
+    pdl_wait();
+    logits += (size_t) blockIdx.x * 512; ids += (size_t) blockIdx.x * 10; weights += (size_t) blockIdx.x * 10;
+    const int lane = threadIdx.x;
+    float values[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
+    float maximum = -INFINITY;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) maximum = max(maximum, values[i]);
+    maximum = warp_max(maximum);
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        values[i] = expf(values[i] - maximum);
+        sum += values[i];
+    }
+    const float reciprocal = 1.0f / warp_sum(sum);
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        values[i] *= reciprocal;
+        if (__isnanf(values[i])) values[i] = -FLT_MAX;
+    }
+    float m8[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) m8[i] = fmaxf(values[2 * i], values[2 * i + 1]);
+#pragma unroll
+    for (int s = 4; s >= 1; s >>= 1)
+#pragma unroll
+        for (int i = 0; i < s; ++i) m8[i] = fmaxf(m8[2 * i], m8[2 * i + 1]);
+    const float lane_max = m8[0];
+    s_max[lane] = lane_max;
+    __syncwarp();
+    int above = 0;   // lane maxima ordered before this one
+#pragma unroll
+    for (int k = 0; k < 32; k += 4) {
+        const float4 o = *reinterpret_cast<const float4*>(s_max + k);
+        above += (o.x > lane_max) || (o.x == lane_max && k < lane);
+        above += (o.y > lane_max) || (o.y == lane_max && k + 1 < lane);
+        above += (o.z > lane_max) || (o.z == lane_max && k + 2 < lane);
+        above += (o.w > lane_max) || (o.w == lane_max && k + 3 < lane);
+    }
+    const float floor_p = __shfl_sync(0xffffffffu, lane_max, __ffs(__ballot_sync(0xffffffffu, above == 9)) - 1, 32);
+    unsigned in = 0;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) in |= (unsigned) (values[i] >= floor_p) << i;
+    const int mine = __popc(in);
+    int end = mine;   // inclusive prefix of the candidate counts
+#pragma unroll
+    for (int d = 1; d < 32; d <<= 1) {
+        const int u = __shfl_up_sync(0xffffffffu, end, d, 32);
+        if (lane >= d) end += u;
+    }
+    const int n_cand = __shfl_sync(0xffffffffu, end, 31, 32);
+    int at = end - mine;
+#pragma unroll
+    for (int i = 0; i < 16; ++i)
+        if (in >> i & 1u) { s_cv[at] = values[i]; s_ci[at] = lane + i * 32; ++at; }
+    __syncwarp();
+    for (int j = lane; j < n_cand; j += 32) {
+        const float v = s_cv[j];
+        const int32_t e = s_ci[j];
+        int rank = 0;
+        for (int k = 0; k < n_cand; ++k) {
+            const float o = s_cv[k];
+            rank += (o > v) || (o == v && s_ci[k] < e);
+        }
+        if (rank < 10) { ids[rank] = e; s_sv[rank] = v; s_si[rank] = e; }
+    }
+    __syncwarp();
+    float selected_sum = 0.0f;
+#pragma unroll
+    for (int r = 0; r < 10; ++r)
+        if ((s_si[r] & 31) == lane) selected_sum += s_sv[r];
+    const float selected = lane < 10 ? s_sv[lane] : 0.0f;
+    selected_sum = max(warp_sum(selected_sum), 6.103515625e-5f);
+    const float inverse_selected_sum = 1.0f / selected_sum;
+    if (lane < 10) weights[lane] = selected * inverse_selected_sum;
+}
 // The residency-biased router: the weights are `route`'s, the selection ranks the resident experts' probabilities times
 // `boost`. One warp a token.
 __launch_bounds__(32, 1)
@@ -212,7 +300,7 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
     if (!stream || n_tok < 1 || !valid(logits, (size_t) n_tok * 512 * 4) || !valid(ids, (size_t) n_tok * 10 * 4) ||
         !valid(weights, (size_t) n_tok * 10 * 4))
         throw std::invalid_argument("native router (multi) requires a stream and aligned [n,512]/[n,10] buffers");
-    launch_pdl(route, dim3((unsigned) n_tok), dim3(32, 8), 0, static_cast<cudaStream_t>(stream), logits, ids, weights);
+    launch_pdl(route_window, dim3((unsigned) n_tok), dim3(32), 0, static_cast<cudaStream_t>(stream), logits, ids, weights);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
