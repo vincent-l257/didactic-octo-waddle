@@ -1973,10 +1973,18 @@ __device__ __forceinline__ void red_release_add_gpu(unsigned int* p, unsigned in
     asm volatile("red.release.gpu.global.add.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory");
 }
 
+// Below cc 9.0 (no programmatic launch) the 8-lane down rows take three entries a pass in four blocks an SM: their
+// loads are latency-bound and the rows then fit in 64 registers (the same bits).
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+#define DOWN40_LEAN 1
+#else
+#define DOWN40_LEAN 0
+#endif
+
 // native_down_kernel with the entries taken GRP_NC at a time.  DEP: launched as a programmatic dependent - the
 // block's first group's weight rows are prefetched into L2 before the wait (and, for IQ4_NL, loaded into registers).
 template<int TD, bool DEP = false>
-__global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned long long* __restrict__ grp_ptr,
+__global__ void __launch_bounds__(256, (kDown40<TD> && DOWN40_LEAN) ? 4 : 1) native_down_multi_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                                 const int32_t* __restrict__ grp_start,
                                                                 const int32_t* __restrict__ n_groups,
                                                                 const int32_t* __restrict__ ent_dst,
@@ -1984,7 +1992,7 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
                                                                 float* __restrict__ out) {
     const int ng = *n_groups;
     if (blockIdx.y >= ng) return;
-    constexpr bool PRE = DEP && TD == 20;
+    constexpr bool PRE = DEP && TD == 20 && !DOWN40_LEAN;
     // PRE: this thread's weight words for the block's first group are loaded before the wait (the weights do not
     // depend on the previous kernel), so the first entry batch starts with them in registers
     typename Split<TD>::W pre[5];
@@ -2023,12 +2031,13 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
             const bool valid_r = (r < L.n_embd);
             const size_t w_off = L.down_off + (size_t) (valid_r ? r : 0) * L.d_row;
             const block_q8_1* s_hq = reinterpret_cast<const block_q8_1*>(s_hq_buf);
+            constexpr int NB = DOWN40_LEAN ? 3 : GRP_NC;   // entries a pass
             for (int g = blockIdx.y; g < ng; g += gridDim.y) {
                 const uint8_t* wr = (const uint8_t*) grp_ptr[g] + w_off;
                 const int e0 = grp_start[g], e1 = grp_start[g + 1];
                 [[maybe_unused]] const float sc = expert_out_scale<TD>(grp_ptr[g], L, 2);
-                for (int e = e0; e < e1; e += GRP_NC) {
-                    const int n = min(GRP_NC, e1 - e);
+                for (int e = e0; e < e1; e += NB) {
+                    const int n = min(NB, e1 - e);
                     const bool use_pre = PRE && pre_ok && g == blockIdx.y && e == e0;
                     const uint32_t* src = reinterpret_cast<const uint32_t*>(hq + (size_t) e * 20);
                     const int words = n * (20 * 9);
@@ -2055,17 +2064,17 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
                             tail_scale<TD>(s2, sc);
                             if (t < 2) out[(size_t) ent_dst[e + t] * L.n_embd + r] = t == 0 ? s2[0] : s2[1];
                         } else {
-                            int off[GRP_NC];
+                            int off[NB];
 #pragma unroll
-                            for (int c = 0; c < GRP_NC; ++c) off[c] = min(c, n - 1) * 20;
-                            float s[GRP_NC];
+                            for (int c = 0; c < NB; ++c) off[c] = min(c, n - 1) * 20;
+                            float s[NB];
                             if constexpr (PRE) {
-                                if (use_pre) row_dot_40_sub8<TD, GRP_NC, false, true>(wr, s_hq, off, n, t, s, pre);
-                                else row_dot_40_sub8<TD, GRP_NC>(wr, s_hq, off, n, t, s);
-                            } else row_dot_40_sub8<TD, GRP_NC>(wr, s_hq, off, n, t, s);
+                                if (use_pre) row_dot_40_sub8<TD, NB, false, true>(wr, s_hq, off, n, t, s, pre);
+                                else row_dot_40_sub8<TD, NB>(wr, s_hq, off, n, t, s);
+                            } else row_dot_40_sub8<TD, NB>(wr, s_hq, off, n, t, s);
                             tail_scale<TD>(s, sc);
 #pragma unroll
-                            for (int c = 0; c < GRP_NC; ++c)
+                            for (int c = 0; c < NB; ++c)
                                 if (c < n && t == c) out[(size_t) ent_dst[e + c] * L.n_embd + r] = s[c];
                         }
                     }
