@@ -215,11 +215,19 @@ __global__ void __launch_bounds__(256) hc8_down2_kernel(Hc8Gr p, float* scr) {
     }
 }
 
+// Below cc 12 the up kernel takes the whole register file (its grid is about one CTA per SM): the default budget
+// spills.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 1200
+#define HC8_UP_BOUNDS __launch_bounds__(256, 1)
+#else
+#define HC8_UP_BOUNDS __launch_bounds__(256)
+#endif
+
 // grid n / 32: thread (d, c, h) takes half of row c*n + d (16-byte chunks h, h+2, ...) and writes R'[c, d] to R_out.
 // Every CTA first finishes rs, lo and the injection from the down slices; block 0 also writes them out.  Q8: the
 // CTA's 32 columns of mixed also as one q8_1 block per token.
 template <int NT, bool Q8>
-__global__ void __launch_bounds__(256) hc8_up2_kernel(Hc8Gr p, const float* scr) {
+__global__ void HC8_UP_BOUNDS hc8_up2_kernel(Hc8Gr p, const float* scr) {
     __shared__ __align__(16) float slo[NT * MAX_LR];
     __shared__ float srs[NT][GHC];
     __shared__ float smix[Q8 ? NT : 1][32];
