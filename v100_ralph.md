@@ -286,12 +286,10 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
    no BF16 .kld base (llama-perplexity --kl-divergence-base from the BF16 GGUF) and no wiki.test.raw on this
    machine (docs/precision/quality.md).
 
-Loop stopped (2026-11-07): the rest are each <= ~5% of the V100's 9.5 s.
-- gdn: Strata's V100 path (src/prefill/gdn_chunk.cu: cumsum/kkt/wmma kernels) has a different structure from
-  Basalt's gdn_chunked.cu; a port is a rewrite for <= ~0.5 s. Strata also has src/split/src/moe_mma.cuh
-  (m8n8k4 expert products, 64-row jobs) - a reference if the expert tile loader gets reworked.
-3. gdn_chunked on WMMA/FP16.
-4. (done) drafter-row report made async.
+- gdn: Strata's V100 path (src/prefill/gdn_chunk.cu) is a rewrite for <= ~0.5 s; its moe_mma.cuh is a reference.
+- Done 11-10: layer-split prompt chunk = prompt/4 in [512, 3072] (stages overlap). IQ4_XS 10,29, no profiler,
+  prompt tok/s at 8192 -> now: 1.4k 827 -> 1013, 4k ~980 -> ~1590, 18k 1822 -> 2458, 88k ~1.6-2k -> 2734.
+  Q6_K gemv rows staged in smem (16 B loads): bitwise, slower on all cards; T=1 already ~600 GB/s on the V100.
 5. Rebalance layer split once the V100 is faster (more layers to it). IQ4_XS: only with a cap on the V100 cache
    so its prompt path never borrows (10,29 lends and streams over x1).
 6. Decode kernels on the V100 (qsa_dec_attn, head).
