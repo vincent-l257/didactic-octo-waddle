@@ -64,6 +64,12 @@ bool Verifier::WindowRecorder::head() {
                 }
             }
         }
+        if (v_.h_final_ != nullptr) {   // the final rows to host beside the head, for the drafter's card
+            cudaEventRecord(v_.ev_fin_fork_, cs);
+            cudaStreamWaitEvent(v_.fin_s_, v_.ev_fin_fork_, 0);
+            cudaMemcpyAsync(v_.h_final_, Rt(0), (size_t) T * HC * N * sizeof(float), cudaMemcpyDeviceToHost, v_.fin_s_);
+            cudaEventRecord(v_.ev_fin_join_, v_.fin_s_);
+        }
         if (v_.head_ != nullptr && v_.head_->loaded()) {
             try {
                 native_quantize_q8_1(v_.head_mixed_, v_.xq_, (int) N, T, cs);
@@ -142,6 +148,7 @@ bool Verifier::WindowRecorder::head() {
         sp.temperature = 0.0f;
         sample_tokens(v_.head_logits_, T, (int) v_.n_vocab_, nullptr, 0, sp, v_.m_out_, cs);
     }
+    if (v_.h_final_ != nullptr) cudaStreamWaitEvent(cs, v_.ev_fin_join_, 0);
     stamp(g.n_layers, 1);
     return true;
 }

@@ -94,6 +94,10 @@ Verifier::~Verifier() {
     if (commit_done_) cudaEventDestroy(commit_done_);
     if (ev_fork_) cudaEventDestroy(ev_fork_);
     if (ev_join_) cudaEventDestroy(ev_join_);
+    if (ev_fin_fork_) cudaEventDestroy(ev_fin_fork_);
+    if (ev_fin_join_) cudaEventDestroy(ev_fin_join_);
+    if (fin_s_) cudaStreamDestroy(fin_s_);
+    if (h_final_) cudaFreeHost(h_final_);
     if (arena_) cudaFree(arena_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_seq_, h_flag_, h_ymiss_, h_pend_,
                      h_flagA_, h_plan_, h_flagB_, h_q_, h_qp_, h_top_, h_head_from_};
@@ -322,6 +326,14 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         cudaEventCreateWithFlags(&lz_fork_, cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&lz_join_, cudaEventDisableTiming) != cudaSuccess) {
         err = "verify: lazy commit stream create failed";
+        return false;
+    }
+    if (lb_ > 0 && le_ >= g.n_layers &&
+        (cudaHostAlloc((void**) &h_final_, (size_t) T * HC * N * sizeof(float), cudaHostAllocPortable) != cudaSuccess ||
+         cudaStreamCreateWithFlags(&fin_s_, cudaStreamNonBlocking) != cudaSuccess ||
+         cudaEventCreateWithFlags(&ev_fin_fork_, cudaEventDisableTiming) != cudaSuccess ||
+         cudaEventCreateWithFlags(&ev_fin_join_, cudaEventDisableTiming) != cudaSuccess)) {
+        err = "verify: final rows' host copy";
         return false;
     }
     *(volatile uint32_t*) h_pend_ = 0;

@@ -380,6 +380,9 @@ public:
     /// Token t's residual after the last layer, (hc, n_embd) on the device, valid until the next `run`.
     const float* final_R(int t) const;
     const float* final_R_all() const { return next_ ? next_->final_R_all() : R_; }
+    /// The same rows in pinned host memory (the last stage of a layer split copies them there while its head runs),
+    /// or null: another card reads them over its own link instead of this card's.
+    const float* final_R_host() const { return next_ ? next_->final_R_host() : h_final_; }
 
     /// The GPU plan the pool writes each layer (VRAM hits + the PCIe share of the misses); give it to the
     /// dispatch (`ExpertDispatch::plan`) before the first `run`.
@@ -628,6 +631,9 @@ private:
     // same launches (and one before each QSA layer) read the next layer's projection weights into L2 while the
     // previous layer's combine waits for the CPU pool or the peer's rows.
     cudaStream_t lz_s_ = nullptr;
+    float* h_final_ = nullptr;          // final_R_host's rows (portable pinned), a split's last stage only
+    cudaStream_t fin_s_ = nullptr;
+    cudaEvent_t ev_fin_fork_ = nullptr, ev_fin_join_ = nullptr;
     cudaEvent_t lz_fork_ = nullptr, lz_join_ = nullptr;
     bool lz_pending_ = false;                       ///< a commit whose lazy layers no window has applied yet
     bool finisher_on() const;                        ///< solo windows start with the finisher

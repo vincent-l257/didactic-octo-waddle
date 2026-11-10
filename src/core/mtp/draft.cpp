@@ -203,7 +203,7 @@ bool MtpDrafter::draft_from(const float* R_rows, int T, const int32_t* tokens, i
     if (R_rows != window_R_) {
         const OnDevice on_device(device_);
         if (cudaMemcpyAsync((void*) window_R_, R_rows, (size_t) T * (size_t) (g_->hc * g_->n_embd) * sizeof(float),
-                            cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
+                            cudaMemcpyDefault, cs_) != cudaSuccess) {
             err = "mtp: staging the window rows failed";
             return false;
         }
