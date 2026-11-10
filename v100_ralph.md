@@ -118,13 +118,16 @@ variants are dead code on 3090/V100); native_mmvq upstream layout (no faster: 1.
   two-card (numbers not shared).
 Specs (V100 PCIe / 3090): FP32 14 / 36 TFLOPS; FP16 tensor fp32-acc ~112 / ~71; INT8 dp4a ~56 / int8 TC ~284;
 bandwidth 900 / 936 GB/s. The V100 wins only on fp16 tensor cores.
-Decode, measured 11-09 (IQ4_XS 10,29, 18k; V100 stage 10.73 ms/window; benches in `<scratchpad>/gt/`):
+Decode 11-09 (IQ4_XS 10,29, 18k; V100 10.52 ms/window, 87.6 tok/s; 250/350/300 W; benches `<scratchpad>/gt/`):
 - Done: hc8 read rewrite (-0.84 ms), native_gu_multi_kernel 4 blocks/SM on sm_70 (IQ4_XS gate/up 101 -> 81 us, -0.12).
+- Done, bitwise: Q5_0 Split (down took the per-entry kernel: 2 tokens an expert 101 -> 74 us V100, 82 -> 55 3090);
+  gu2 a half-warp a row, 64 regs (IQ3_XXS gu 84 -> 74 us); hc8 down slice padded in smem (-1.3 us a read). Window
+  25.60 -> 25.07 ms. No gain: IQ4_XS on gu2; hc8 in one launch with a spin-wait (-1 us a read); IQ3_XXS lookups (8 us).
 - Dense: the UD pack's projections run Q6_K (its GGUF section; 86 launches/window). T=3 at 1.8x the HBM floor (qkv 47
   vs 27 us). Tried, bitwise, no gain: activations in smem + warp per row, int->float by magic add, 2-4 rows a warp
   sharing activation loads (+8% at best). Next is a numerics change (fp16 HMMA): ~0.3-0.5 ms. Q8_0 at 1.15-1.3x floor.
-- Experts (27 a layer, one token each): V100 gu 81-84 us, down 59-67 us (~450 GB/s); 3090 600-750 GB/s. IQ3_XXS gu2
-  uses 128 regs and spills under any bound. The glue path needs hc_fused (cc 12 only).
+- Experts (27 a layer, one token each): V100 gu 74-81 us, down 59-64 us (~450 GB/s); 3090 600-750 GB/s. The glue
+  path needs hc_fused (cc 12 only).
 - Head: Q8_0 screen 516 MB/window in 0.81 ms (~75% of HBM): leave. "GPU-reach wait" is host time overlapping GPU work.
 - Launch gaps: V100 graph 618 nodes at T=3 (~32/layer) at ~1.9 us; each fusion of one node a layer saves ~36 us.
 Prompt (V100 ~9.5 s busy per 18k):
