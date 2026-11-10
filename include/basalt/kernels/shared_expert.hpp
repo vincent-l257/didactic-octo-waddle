@@ -60,10 +60,11 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const SForm& gat
 /// Plan v0.3 P6: the shared expert for `n_tok` <= 8 tokens (a verify window) with all three projections native:
 /// multi-column MMVQ, so the weights are read once; every token is bitwise `shared_expert` on that token.
 /// `x` (n_tok, n_embd) f32, `gate`/`up`
-/// (n_tok, n_ff) scratch, `g` n_tok floats, `out` (n_tok, n_embd).  `nw.q8_1` must hold n_tok columns of n_embd.
+/// (n_tok, n_ff) scratch, `g` n_tok floats, `out` (n_tok, n_embd).  `nw.q8_1` must hold n_tok columns of n_embd;
+/// `x_q8`: it already holds x's q8_1 rows (native_quantize_q8_1's).
 void shared_expert_multi(int n_tok, const float* x, const NativeSharedWeights& nw,
                          const uint16_t* gate_inp_bf16, float* gate, float* up, float* g, float* out, int64_t n_embd,
-                         int64_t n_ff, void* stream);
+                         int64_t n_ff, void* stream, bool x_q8 = false);
 
 /// shared_expert_multi's projections alone, for a caller that has x's q8_1 rows (native_quantize_q8_1's) in
 /// `nw.q8_1` and applies the per-token gate itself: `out` = down(swiglu(gate, up)), bitwise shared_expert_multi's

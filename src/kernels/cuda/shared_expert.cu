@@ -103,11 +103,11 @@ constexpr bool fused_swiglu_q81_enabled() { return true; }
 
 void shared_expert_multi(int n_tok, const float* x, const NativeSharedWeights& nw,
                          const uint16_t* gate_inp_bf16, float* gate, float* up, float* g, float* out, int64_t n_embd,
-                         int64_t n_ff, void* stream) {
+                         int64_t n_ff, void* stream, bool x_q8) {
     if (n_tok < 1 || n_tok > 8 || !nw.q8_1 || !nw.gate_data || !nw.up_data || !nw.down_data || !stream)
         throw std::invalid_argument("shared_expert_multi: needs 1..8 tokens, native weights, scratch and a stream");
     cudaStream_t cs = (cudaStream_t) stream;
-    native_quantize_q8_1(x, nw.q8_1, (int) n_embd, n_tok, stream);
+    if (!x_q8) native_quantize_q8_1(x, nw.q8_1, (int) n_embd, n_tok, stream);
     const void* x_q8_1 = nw.q8_1;
     native_mmvq(nw.gate_type, nw.gate_data, x_q8_1, gate, (int) n_embd, (int) n_ff, n_tok, stream);
     native_mmvq(nw.up_type, nw.up_data, x_q8_1, up, (int) n_embd, (int) n_ff, n_tok, stream);

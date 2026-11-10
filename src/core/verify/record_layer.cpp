@@ -94,7 +94,8 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
         }
         pending = false;
     }
-    auto gr_read_group = [&](int half, bool apply, float* inj_prev, float* inj_out) {
+    // xq: mixed's q8_1 rows written by the read, or null
+    auto gr_read_group = [&](int half, bool apply, float* inj_prev, float* inj_out, uint8_t* xq) {
         FusedGrArgs fa[kFusedGrMaxT];
         for (int t = 0; t < T; ++t) {
             FusedGrArgs& a = fa[t];
@@ -104,6 +105,7 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
             a.w_up = (const uint16_t*) wu[half]->data; a.w_inject = (const uint16_t*) wi[half]->data;
             a.eps = EPS; a.lo = v_.lo_ + t * g.hc_lr; a.rs = v_.rs_ + t * HC;
             a.inject_out = inj_out + t * HC; a.mixed = v_.mixed_ + t * N;
+            a.xq = xq ? xq + (size_t) t * (N / 32) * 36 : nullptr;
         }
         fused_gr_read_multi(fa, n, v_.xn_, cs, v_.prof_on_ ? v_.prof_ : nullptr,
                             (int) (l * kProfPer + (half == 0 ? 27 : 30)));
@@ -119,6 +121,8 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
         return h;
     };
     const bool read_q8 = dec_hc && hc_fused_q8_rows_ok();
+    // the attention-side read leaves mixed's q8_1 rows in xq_ (gr_read_group always writes them)
+    const bool attn_q8 = read_q8 || !dec_hc;
     const WeightRef* w_router = v.get("ffn_gate_inp.weight");
     const bool router_multi = w_router != nullptr && NE == 512 && K == 10;
     // the GDN mixer split by key head: the layer's q8_1 rows and a doorbell for the peer's key heads; in a batch
@@ -178,12 +182,12 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
             h.pf[0] = wn[1]->data; h.pf_bytes[0] = (size_t) HC * N * sizeof(float);
             hc_fused_read(h, cs);
         } else {
-            gr_read_group(0, pending, v_.inj2_, v_.inj_);
+            gr_read_group(0, pending, v_.inj2_, v_.inj_, v_.xq_);
         }
     }
     stamp(l, 1);
     if (gs_ring) {
-        if (!read_q8) native_quantize_q8_1(v_.mixed_, v_.xq_, (int) N, n, cs);
+        if (!attn_q8) native_quantize_q8_1(v_.mixed_, v_.xq_, (int) N, n, cs);
         const int64_t r = l - v_.lb_;
         dec_moe_mix_publish(v_.xq_, v_.mixed_, n, (int) N, v_.gs_m_xq_ + (size_t) r * v_.dm_->xq_stride,
                             v_.gs_m_x_ + (size_t) r * v_.dm_->x_stride, v_.dm_->m_w + 48, (uint32_t) (r + 1), gs_split, cs);
@@ -207,9 +211,9 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
         if (mid_ok) {
             // the middle ran in the mid chain
         } else if (!is_qsa_layer(g, l)) {
-            if (!gdn(l, v, read_q8, gs_split)) return false;
+            if (!gdn(l, v, attn_q8, gs_split)) return false;
         } else {
-            if (!qsa(l, v, read_q8)) return false;
+            if (!qsa(l, v, attn_q8)) return false;
         }
     } catch (const std::exception& e) {
         err = "verify layer " + std::to_string(l) + ": " + e.what();
@@ -264,7 +268,7 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
             if (next_norm != nullptr) { h.pf[0] = next_norm->data; h.pf_bytes[0] = (size_t) HC * N * sizeof(float); }
             hc_fused_read(h, cs);
         } else {
-            gr_read_group(1, true, v_.inj_, v_.inj2_);
+            gr_read_group(1, true, v_.inj_, v_.inj2_, sh_fork ? v_.sh_xq_ : v_.xq_);
         }
     }
     if (sh_fork) {
@@ -392,7 +396,7 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
                                          v_.ev_sh2_);
             else
                 shared_expert_multi(n, xm, nsw, (const uint16_t*) wgi->data, v_.sh_gate_,
-                                    v_.sh_up_, v_.sh_g_, v_.shared_, N, g.n_ff, sh_stream);
+                                    v_.sh_up_, v_.sh_g_, v_.shared_, N, g.n_ff, sh_stream, !dec_hc);
         } catch (const std::exception& e) {
             err = std::string("verify shared expert: ") + e.what();
             return false;
