@@ -71,11 +71,12 @@ const char* name_of(int t) {
         case 12: return "Q4_K";
         case 13: return "Q5_K";
         case 7: return "Q5_1";
+        case 6: return "Q5_0";
         case 8: return "Q8_0";
         default: return "?";
     }
 }
-int block_values(int t) { return t == 20 || t == 7 || t == 8 ? 32 : t == 42 || t == 40 ? 64 : 256; }
+int block_values(int t) { return t == 20 || t == 7 || t == 6 || t == 8 ? 32 : t == 42 || t == 40 ? 64 : 256; }
 // A UE4M3 sub-block scale byte.  Profile 0: exponent 1..4 (small blocks).  Profile 1: exponent 6..14, block values in
 // the hundreds as the packs' are (their tails are 1e-5..1e-4).  Profile 2: profile 1 with the odd bytes mixed in: 0x7F
 // (the NaN code, decoded as 0), the sign bit set (ignored), zero and subnormals.
@@ -201,6 +202,19 @@ void check_mmvq(int t, int n_in, int n_out, cudaStream_t s, std::mt19937& rng) {
             for (int r = 0; r < n_out; ++r) {
                 double acc = 0;
                 for (int i = 0; i < n_in; ++i) acc += (double) wf[(size_t) r * n_in + i] * xd[(size_t) c * n_in + i];
+                if (t == 6) {   // Q5_0's -16 offset takes the original activations' sum (q8_1 ds.y), as upstream
+                    const size_t rb = k::iq_row_bytes(t, n_in);
+                    for (int b = 0; b < n_in / 32; ++b) {
+                        uint16_t h;
+                        std::memcpy(&h, &w[(size_t) r * rb + (size_t) b * 22], 2);
+                        double dq = 0, dx0 = 0;
+                        for (int i = 32 * b; i < 32 * b + 32; ++i) {
+                            dq += xd[(size_t) c * n_in + i];
+                            dx0 += x[(size_t) c * n_in + i];
+                        }
+                        acc += 16.0 * (double) k::f32_from_f16(h) * (dq - dx0);
+                    }
+                }
                 const float g = y_new[(size_t) c * n_out + r];
                 finite = finite && std::isfinite(g);
                 num += std::fabs(g - acc);
@@ -548,12 +562,12 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     ck(cudaStreamCreate(&s), "stream");
     std::mt19937 rng(18);
-    for (int t : {16, 17, 18, 20, 21, 22, 23, 29, 42, 40, 12, 13, 7, 8}) {
+    for (int t : {16, 17, 18, 20, 21, 22, 23, 29, 42, 40, 12, 13, 7, 6, 8}) {
         check_mmvq(t, 2560, 67, s, rng);   // the model's n_embd; 67 rows: a partial block of 4 rows
         check_mmvq(t, 1024, 5, s, rng);
     }
     for (int gu : {16, 17, 18, 21, 22, 23, 29, 42}) {
-        for (int dt : {20, 42}) check_grouped(gu, dt, 2560, 640, s, rng);   // the model's shape
+        for (int dt : {20, 42, 6}) check_grouped(gu, dt, 2560, 640, s, rng);   // the model's shape
         check_grouped(gu, 23, 1024, 512, s, rng);                           // IQ4_XS down needs n_ff % 256 == 0
     }
     for (auto [gu, dt] : {std::pair<int, int>{12, 7}, {12, 8}, {13, 8}, {13, 7}, {8, 8}}) {   // the Q4_K_XL and Q8_0 pairs
