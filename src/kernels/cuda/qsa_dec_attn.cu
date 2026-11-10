@@ -2,6 +2,7 @@
 #include "basalt/kernels/qsa_dec_attn.hpp"
 #include "basalt/kernels/sm70_emu.cuh"
 #include "basalt/kernels/qsa_seg.hpp"
+#include "basalt/kernels/kv_q4.hpp"
 #include "basalt/kernels/kv_q8.hpp"
 #include "basalt/kernels/packed_byte.hpp"
 #include "basalt/kernels/pdl.hpp"
@@ -101,11 +102,13 @@ __device__ __forceinline__ void cp_async_wait_all() {
 #endif
 }
 
-// shared memory of one chunk block; KV_MODE 0: fp16 rows, 1: int8 rows + fp16 scales
+// shared memory of one chunk block; KV_MODE 0: fp16 rows, 1: int8 rows + fp16 scales, 3: int8 K rows + scales and
+// q4_0 V rows
 template <int KV_MODE> struct ChunkSmem {
-    static constexpr int ROW = KV_MODE == 0 ? HD * 2 : HD;   // bytes of one cell's K (or V) row
+    static constexpr int ROW = KV_MODE == 0 ? HD * 2 : HD;   // bytes of one cell's K row
+    static constexpr int VROW = KV_MODE == 3 ? (HD / QK4_0) * (int) sizeof(block_q4_0) : ROW;   // and of its V row
     alignas(16) unsigned char k[CHUNK][ROW];
-    alignas(16) unsigned char v[CHUNK][ROW];
+    alignas(16) unsigned char v[CHUNK][VROW];
     alignas(16) uint16_t ks[CHUNK][NSC];
     alignas(16) uint16_t vs[CHUNK][NSC];
     float sp[G][CHUNK];        // scores
@@ -200,15 +203,32 @@ __device__ __forceinline__ void attn_chunk_dev(const AttnArgs& a, int chunk, int
     {
         const unsigned char* kb = KV_MODE == 0 ? (const unsigned char*) pools.k_pool : (const unsigned char*) pools.k_q;
         const unsigned char* vb = KV_MODE == 0 ? (const unsigned char*) pools.v_pool : (const unsigned char*) pools.v_q;
-        for (int i = t; i < CHUNK * PER; i += THREADS) {
-            const int c = i / PER, j = i % PER;
-            const long long r = sm.row[c];
-            if (r < 0) {   // a masked or missing cell's values are zero, so the value loop needs no branch
-                *reinterpret_cast<uint4*>(&sm.v[c][j * 16]) = make_uint4(0, 0, 0, 0);
-                continue;
+        if constexpr (KV_MODE == 3) {
+            constexpr int VROW = ChunkSmem<KV_MODE>::VROW, VPER = VROW / 16;
+            vb = (const unsigned char*) pools.v_q4;
+            for (int i = t; i < CHUNK * PER; i += THREADS) {
+                const int c = i / PER, j = i % PER;
+                const long long r = sm.row[c];
+                if (r >= 0) cp_async16(&sm.k[c][j * 16], kb + r * ROW + j * 16);
             }
-            cp_async16(&sm.k[c][j * 16], kb + r * ROW + j * 16);
-            cp_async16(&sm.v[c][j * 16], vb + r * ROW + j * 16);
+            for (int i = t; i < CHUNK * VPER; i += THREADS) {
+                const int c = i / VPER, j = i % VPER;
+                const long long r = sm.row[c];
+                if (r < 0) *reinterpret_cast<uint4*>(&sm.v[c][j * 16]) = make_uint4(0, 0, 0, 0);
+                else cp_async16(&sm.v[c][j * 16], vb + r * VROW + j * 16);
+            }
+            if (t < CHUNK && sm.row[t] >= 0) cp_async8(&sm.ks[t][0], pools.k_scale + sm.row[t] * NSC);
+        } else {
+            for (int i = t; i < CHUNK * PER; i += THREADS) {
+                const int c = i / PER, j = i % PER;
+                const long long r = sm.row[c];
+                if (r < 0) {   // a masked or missing cell's values are zero, so the value loop needs no branch
+                    *reinterpret_cast<uint4*>(&sm.v[c][j * 16]) = make_uint4(0, 0, 0, 0);
+                    continue;
+                }
+                cp_async16(&sm.k[c][j * 16], kb + r * ROW + j * 16);
+                cp_async16(&sm.v[c][j * 16], vb + r * ROW + j * 16);
+            }
         }
         if constexpr (KV_MODE == 1) {
             if (t < 2 * CHUNK) {
@@ -304,6 +324,15 @@ __device__ __forceinline__ void attn_chunk_dev(const AttnArgs& a, int chunk, int
         if constexpr (KV_MODE == 0) {
             const float2 f = __half22float2(*reinterpret_cast<const __half2*>(&sm.v[c][t * 4]));
             v0 = f.x; v1 = f.y;
+        } else if constexpr (KV_MODE == 3) {   // dimensions 2t, 2t+1: q4_0 block t / 16, codes as the reference unpacks them
+            const unsigned char* blk = &sm.v[c][(t / 16) * (int) sizeof(block_q4_0)];
+            const float d = __half2float(__ushort_as_half(*reinterpret_cast<const ushort*>(blk)));
+            const int rem = 2 * (t % 16);
+            const ushort raw = *reinterpret_cast<const ushort*>(blk + 2 + (rem < 16 ? rem : rem - 16));
+            const int n0 = rem < 16 ? (int) (raw & 0x0F) - 8 : (int) ((raw >> 4) & 0x0F) - 8;
+            const int n1 = rem < 16 ? (int) ((raw >> 8) & 0x0F) - 8 : (int) (raw >> 12) - 8;
+            v0 = (float) n0 * d;
+            v1 = (float) n1 * d;
         } else {
             const float sc = __half2float(__ushort_as_half(sm.vs[c][t / (KV_Q8_GROUP / 2)]));
             const ushort raw = *reinterpret_cast<const ushort*>(&sm.v[c][t * 2]);
@@ -729,7 +758,7 @@ __global__ void __launch_bounds__(THREADS) draft_merge(AttnArgs a) {
 // the int8 rows' block is small enough for two per multiprocessor: a decode window's chunk blocks (3 queries x 2 KV heads x
 // 33 chunks) then all run at once
 template <int KV_MODE, bool SEG>
-__global__ void __launch_bounds__(THREADS, KV_MODE == 1 ? 2 : 1) attn_chunk_v2(AttnArgs a) {
+__global__ void __launch_bounds__(THREADS, KV_MODE != 0 ? 2 : 1) attn_chunk_v2(AttnArgs a) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
     pdl_launch_dependents();
     pdl_wait();
@@ -745,7 +774,10 @@ __global__ void __launch_bounds__(THREADS) attn_merge_v2(AttnArgs a) {
 
 bool a16(const void* p) { return ((uintptr_t) p & 15) == 0; }
 int kv_mode_of(const QsaAttnPools& p) {
-    if (p.k_q4 != nullptr || p.v_q4 != nullptr) return -1;
+    if (p.k_q4 != nullptr) return -1;
+    if (p.v_q4 != nullptr)   // K8V4: INT8 K, rotated Q4_0 V
+        return (p.k_q != nullptr && p.v_q == nullptr && p.k_scale != nullptr && a16(p.k_q) && a16(p.v_q4) &&
+                ((uintptr_t) p.k_scale & 7) == 0) ? 3 : -1;
     if (p.k_q != nullptr)
         return (p.v_q != nullptr && p.k_scale != nullptr && p.v_scale != nullptr && a16(p.k_q) && a16(p.v_q) &&
                 ((uintptr_t) p.k_scale & 7) == 0 && ((uintptr_t) p.v_scale & 7) == 0) ? 1 : -1;
@@ -764,8 +796,9 @@ template <int MODE> void opt_in(void (*kernel)(AttnArgs), size_t bytes) {
 
 }  // namespace
 
-bool qsa_dec_attn_supported(const QsaAttnPools& pools, const QsaShapes& s) {
-    return s.head_dim == HD && s.n_head == (int64_t) G * s.n_head_kv && kv_mode_of(pools) >= 0 &&
+bool qsa_dec_attn_supported(const QsaAttnPools& pools, const QsaShapes& s, bool rotated_v) {
+    const int mode = kv_mode_of(pools);
+    return s.head_dim == HD && s.n_head == (int64_t) G * s.n_head_kv && mode >= 0 && (rotated_v || mode != 3) &&
            pools.page_table != nullptr;
 }
 
@@ -773,11 +806,12 @@ void qsa_dec_attn(const float* q, const QsaAttnPools& pools, const int32_t* ids,
                   const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream, const float* q_full,
                   float* attn_gated, void* xq, void* merge_after) {
     if (n_q <= 0) return;
-    if (!qsa_dec_attn_supported(pools, s) || cap <= 0 || !scratch || !ids || !steps || n_q > 65535) {
+    const int mode = kv_mode_of(pools);
+    if (!qsa_dec_attn_supported(pools, s, true) || cap <= 0 || !scratch || !ids || !steps || n_q > 65535 ||
+        (mode == 3 && q_full != nullptr)) {
         basalt::log::error("basalt", "qsa_dec_attn: unsupported geometry, pools or buffers");
         std::exit(1);
     }
-    const int mode = kv_mode_of(pools);
     AttnArgs a;
     a.q = q; a.p = pools; a.ids = ids; a.steps = steps;
     a.n_kv_heads = (int) s.n_head_kv; a.page_size = (int) s.page_size;
@@ -806,6 +840,10 @@ void qsa_dec_attn(const float* q, const QsaAttnPools& pools, const int32_t* ids,
         constexpr size_t bytes = sizeof(ChunkSmem<1>);
         opt_in<1>(attn_chunk_v2<1, false>, bytes);
         launch_pdl(attn_chunk_v2<1, false>, grid, dim3(THREADS), bytes, st, a);
+    } else if (mode == 3) {
+        constexpr size_t bytes = sizeof(ChunkSmem<3>);
+        opt_in<4>(attn_chunk_v2<3, false>, bytes);
+        launch_pdl(attn_chunk_v2<3, false>, grid, dim3(THREADS), bytes, st, a);
     } else {
         constexpr size_t bytes = sizeof(ChunkSmem<0>);
         opt_in<0>(attn_chunk_v2<0, false>, bytes);

@@ -1,5 +1,6 @@
 // tests/kernels/qsa_dec_attn_parity.cpp - qsa_dec_attn against qsa_decode_attn_batch (+ native_qsa_gate_apply), bitwise,
-// on random INT8 and FP16 pools through a permuted page table with masked pages; then a microbench of both.
+// on random INT8, FP16 and K8V4 (INT8 K, Q4_0 V; no gate) pools through a permuted page table with masked pages; then a
+// microbench of both.
 //   qsa_dec_attn_parity [iters]
 #include "basalt/kernels/native_mmvq.hpp"
 #include "basalt/kernels/native_qsa.hpp"
@@ -42,6 +43,7 @@ uint16_t f16(float x) { __half h = __float2half(x); uint16_t b; std::memcpy(&b, 
 struct Pools {
     int8_t *kq = nullptr, *vq = nullptr;
     uint16_t *ks = nullptr, *vs = nullptr, *kp = nullptr, *vp = nullptr;
+    uint8_t* v4 = nullptr;   // Q4_0 V rows (18-byte blocks)
     int32_t* table = nullptr;
 };
 }  // namespace
@@ -60,6 +62,7 @@ int main(int argc, char** argv) {
     p.ks = dalloc<uint16_t>(rows * D / 64); p.vs = dalloc<uint16_t>(rows * D / 64);
     p.kp = dalloc<uint16_t>(rows * D); p.vp = dalloc<uint16_t>(rows * D);
     p.table = dalloc<int32_t>(pages);
+    p.v4 = dalloc<uint8_t>(rows * (D / 32) * 18);
     {
         std::vector<int8_t> c(rows * D);
         std::vector<uint16_t> sc(rows * D / 64), hp(rows * D);
@@ -71,6 +74,13 @@ int main(int argc, char** argv) {
             up(which ? p.vs : p.ks, sc);
             up(which ? p.vp : p.kp, hp);
         }
+        std::vector<uint8_t> v4(rows * (D / 32) * 18);
+        for (size_t b = 0; b < v4.size() / 18; ++b) {
+            const uint16_t d = f16(ud(rng) * 4.0f);
+            std::memcpy(&v4[b * 18], &d, 2);
+            for (int j = 0; j < 16; ++j) v4[b * 18 + 2 + j] = (uint8_t) rng();
+        }
+        up(p.v4, v4);
     }
     std::vector<int32_t> table(pages);
     for (int i = 0; i < pages; ++i) table[i] = i;
@@ -100,7 +110,8 @@ int main(int argc, char** argv) {
     auto pools_of = [&](int mode) {
         k::QsaAttnPools a;
         a.page_table = p.table;
-        if (mode == 1) { a.k_q = p.kq; a.v_q = p.vq; a.k_scale = p.ks; a.v_scale = p.vs; }
+        if (mode == 3) { a.k_q = p.kq; a.k_scale = p.ks; a.v_q4 = p.v4; }
+        else if (mode == 1) { a.k_q = p.kq; a.v_q = p.vq; a.k_scale = p.ks; a.v_scale = p.vs; }
         else { a.k_pool = p.kp; a.v_pool = p.vp; }
         return a;
     };
@@ -127,6 +138,43 @@ int main(int argc, char** argv) {
         float* scr_ref = dalloc<float>(sf * n_q);
         float* scr_new = dalloc<float>(sf * n_q);
         const k::QsaAttnPools a = pools_of(mode);
+        if (mode == 3) {   // K8V4: V is rotated, so the caller applies the gate after rotating back
+            const size_t n = (size_t) n_q * NH * D;
+            ck(cudaMemsetAsync(out_new, 0xff, n * 4, st), "memset");
+            k::qsa_decode_attn_batch(q, a, ids, steps, cap, s, scr_ref, out_ref, n_q, st);
+            k::qsa_dec_attn(q, a, ids, steps, cap, s, scr_new, out_new, n_q, st);
+            ck(cudaStreamSynchronize(st), "sync");
+            const auto r = down(out_ref, n), x = down(out_new, n);
+            size_t bad = 0;
+            for (size_t i = 0; i < n; ++i) bad += std::memcmp(&r[i], &x[i], 4) != 0;
+            if (bad) ++g_fail;
+            std::printf("%-34s mode 3 cap %5d nq %d: %s (attn %zu of %zu differ)\n", label, cap, n_q, bad ? "FAIL" : "bitwise",
+                        bad, n);
+            if (bench) {
+                cudaEvent_t e0, e1;
+                cudaEventCreate(&e0);
+                cudaEventCreate(&e1);
+                float ms_ref = 0, ms_new = 0;
+                for (int rep = 0; rep < 2; ++rep) {
+                    cudaEventRecord(e0, st);
+                    for (int it = 0; it < iters; ++it) k::qsa_decode_attn_batch(q, a, ids, steps, cap, s, scr_ref, out_ref, n_q, st);
+                    cudaEventRecord(e1, st);
+                    cudaEventSynchronize(e1);
+                    cudaEventElapsedTime(&ms_ref, e0, e1);
+                    cudaEventRecord(e0, st);
+                    for (int it = 0; it < iters; ++it) k::qsa_dec_attn(q, a, ids, steps, cap, s, scr_new, out_new, n_q, st);
+                    cudaEventRecord(e1, st);
+                    cudaEventSynchronize(e1);
+                    cudaEventElapsedTime(&ms_new, e0, e1);
+                }
+                std::printf("   bench: ref (attn+merge) %7.2f us | new %7.2f us | %.2fx\n", 1e3 * ms_ref / iters,
+                            1e3 * ms_new / iters, ms_ref / ms_new);
+            }
+            cudaFree(ids);
+            cudaFree(scr_ref);
+            cudaFree(scr_new);
+            return;
+        }
         k::qsa_decode_attn_batch(q, a, ids, steps, cap, s, scr_ref, out_ref, n_q, st);
         k::native_qsa_gate_apply(out_ref, qfull, gated_ref, NH * n_q, D, st);
         k::qsa_dec_attn(q, a, ids, steps, cap, s, scr_new, out_new, n_q, st, qfull, gated_new);
@@ -199,7 +247,12 @@ int main(int argc, char** argv) {
         cudaFree(scr_new);
     };
     const int cap = (int) k::qsa_selection_width(k::kTopkMaxCells, s);
-    for (int mode = 1; mode >= 0; --mode) {
+    if (!k::qsa_dec_attn_supported(pools_of(3), s, true) || k::qsa_dec_attn_supported(pools_of(3), s)) {
+        std::printf("qsa_dec_attn_supported: K8V4 pools must need rotated_v\n");
+        ++g_fail;
+    }
+    for (int mode = 3; mode >= 0; --mode) {
+        if (mode == 2) continue;
         run_case(mode, cap, 1, {1}, false, true, false, "first cell");
         run_case(mode, cap, 3, {63, 64, 65}, false, true, false, "chunk edges");
         run_case(mode, cap, 3, {1250, 1251, 1252}, false, true, true, "prose window (identity)");
@@ -375,14 +428,16 @@ int main(int argc, char** argv) {
         cudaEvent_t e0, e1;
         cudaEventCreate(&e0);
         cudaEventCreate(&e1);
-        for (int mode = 1; mode >= 0; --mode) {
+        for (int mode = 3; mode >= 0; --mode) {
+            if (mode == 2) continue;
             const k::QsaAttnPools a = pools_of(mode);
             for (int cold = 0; cold < 2; ++cold) {
                 double tot = 0;
                 for (int it = 0; it < iters; ++it) {
                     if (cold) cudaMemsetAsync(flush, it, fn, st);
                     cudaEventRecord(e0, st);
-                    k::qsa_dec_attn(q, a, ids, steps, cap, s, scr, out_new, n_q, st, qfull, gated_new, xq_fm);
+                    if (mode == 3) k::qsa_dec_attn(q, a, ids, steps, cap, s, scr, out_new, n_q, st);
+                    else k::qsa_dec_attn(q, a, ids, steps, cap, s, scr, out_new, n_q, st, qfull, gated_new, xq_fm);
                     cudaEventRecord(e1, st);
                     cudaEventSynchronize(e1);
                     float ms = 0;

@@ -14,8 +14,9 @@
 
 namespace basalt::kernels {
 
-/// The pools this kernel reads: FP16 or INT8 (not Q4_0, not hybrid); false sends the caller to qsa_decode_attn_batch.
-bool qsa_dec_attn_supported(const QsaAttnPools& pools, const QsaShapes& s);
+/// The pools this kernel reads: FP16 or INT8 (not Q4_0); with `rotated_v` also K8V4 (INT8 K, rotated Q4_0 V), whose
+/// output the caller rotates back, so it takes no gate. False sends the caller to qsa_decode_attn_batch.
+bool qsa_dec_attn_supported(const QsaAttnPools& pools, const QsaShapes& s, bool rotated_v = false);
 
 /// qsa_decode_attn_batch's contract and scratch (qsa_decode_attn_scratch_floats(cap, s) floats per query).
 /// q_full / attn_gated non-null: also attn_gated = attn * sigmoid(gate half of q_full) per head.

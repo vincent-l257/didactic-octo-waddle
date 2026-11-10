@@ -278,6 +278,8 @@ bool Verifier::WindowRecorder::qsa(int64_t l, const LayerView& v, bool read_q8) 
         qsa_dec_attn(v_.qcur_, pools, v_.sel_, v_.step_, v_.cap_, s,
                      v_.attn_scratch_, v_.attn_, n, cs,
                      v_.qfull_, v_.attn32_, attn_q8 ? v_.xq_ : nullptr, qhalf ? (void*) v_.qev_[1] : nullptr);
+    else if (st.kv_hybrid && qsa_dec_attn_supported(pools, s, true))   // K8V4: staged chunks, the same bits; no gate
+        qsa_dec_attn(v_.qcur_, pools, v_.sel_, v_.step_, v_.cap_, s, v_.attn_scratch_, v_.attn_, n, cs);
     else
     qsa_decode_attn_batch(v_.qcur_, pools, v_.sel_, v_.step_, v_.cap_,
                           s, v_.attn_scratch_, v_.attn_, n, cs);
