@@ -110,10 +110,11 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--selftest") == 0) {
         // {context, capacity}: both sides of the register kernel's reach (33,792 blocks = 135,168 cells), short
         // contexts under a long capacity (fewer blocks than the kernel's threads; a prompt batch below the dispatch's
-        // 4,608 blocks), and the long contexts themselves
+        // 4,608 blocks), the long contexts themselves, and verify windows of a 262,144-cell cache whose blocks the
+        // wide kernel holds in registers or not
         const int64_t cases[][2] = {{9000, 9000},    {135160, 135160}, {135176, 135176}, {2100, 262144},
-                                    {9000, 262144},  {32768, 262144},  {262144, 262144}, {300001, 524288},
-                                    {524288, 524288}};
+                                    {9000, 262144},  {18432, 262144},  {32768, 262144},  {32772, 262144},
+                                    {65536, 262144}, {262144, 262144}, {300001, 524288}, {524288, 524288}};
         bool ok = true;
         for (const auto& c : cases) {
             ok = run_case(c[0], 8, 3, c[1], false) && ok;     // a decode window's call

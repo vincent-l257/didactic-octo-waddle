@@ -340,6 +340,38 @@ __device__ __forceinline__ int block_excl_scan(int v, int* s_warp, int& total) {
     return r;
 }
 
+// The digit of a radix pass: the largest d with above + (bins over d) + bins[d] >= width (0 if none), and the cells
+// above it, as a scan by warp 0 (lane l holds bins 8l..8l+7); the result lands in s_digit / s_above.
+__device__ __forceinline__ void pick_digit(const int* bins, int above, int64_t width, int lane, int* s_digit,
+                                           int* s_above) {
+    int h[8], loc = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) { h[i] = bins[lane * 8 + i]; loc += h[i]; }
+    int sfx = loc;                            // inclusive sum over lanes >= this one
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+        const int y = __shfl_down_sync(0xffffffffu, sfx, o);
+        if (lane + o < 32) sfx += y;
+    }
+    int cum = above + sfx - loc;              // above plus the bins over this lane's
+    int d = -1, ca = 0;
+#pragma unroll
+    for (int i = 7; i >= 0; --i) {
+        if (d < 0 && cum + h[i] >= width) { d = lane * 8 + i; ca = cum; }
+        cum += h[i];
+    }
+    const unsigned hit = __ballot_sync(0xffffffffu, d >= 0);
+    if (hit) {
+        const int src = 31 - __clz(hit);      // the highest lane with a hit holds the largest digit
+        d = __shfl_sync(0xffffffffu, d, src);
+        ca = __shfl_sync(0xffffffffu, ca, src);
+    } else {
+        d = 0;
+        ca = above + sfx - h[0];                  // read on lane 0: every bin over 0
+    }
+    if (lane == 0) { *s_digit = d; *s_above = ca; }
+}
+
 template <int PER>
 __global__ void __launch_bounds__(TK_T) block_topk_reg_kernel(const float* __restrict__ scores,
                                                               const int32_t* __restrict__ steps, int64_t max_blocks,
@@ -386,36 +418,7 @@ __global__ void __launch_bounds__(TK_T) block_topk_reg_kernel(const float* __res
             hist[0][t] = s;
         }
         __syncthreads();
-        if (warp == 0) {
-            // the largest digit d with above + (bins over d) + hist[d] >= width (0 if none), as a warp scan:
-            // lane l holds bins 8l..8l+7
-            int h[8], loc = 0;
-#pragma unroll
-            for (int i = 0; i < 8; ++i) { h[i] = hist[0][lane * 8 + i]; loc += h[i]; }
-            int sfx = loc;                            // inclusive sum over lanes >= this one
-#pragma unroll
-            for (int o = 1; o < 32; o <<= 1) {
-                const int y = __shfl_down_sync(0xffffffffu, sfx, o);
-                if (lane + o < 32) sfx += y;
-            }
-            int cum = above + sfx - loc;              // above plus the bins over this lane's
-            int d = -1, ca = 0;
-#pragma unroll
-            for (int i = 7; i >= 0; --i) {
-                if (d < 0 && cum + h[i] >= width) { d = lane * 8 + i; ca = cum; }
-                cum += h[i];
-            }
-            const unsigned hit = __ballot_sync(0xffffffffu, d >= 0);
-            if (hit) {
-                const int src = 31 - __clz(hit);      // the highest lane with a hit holds the largest digit
-                d = __shfl_sync(0xffffffffu, d, src);
-                ca = __shfl_sync(0xffffffffu, ca, src);
-            } else {
-                d = 0;
-                ca = above + sfx - h[0];                  // read on lane 0: every bin over 0
-            }
-            if (lane == 0) { s_digit = d; s_above = ca; }
-        }
+        if (warp == 0) pick_digit(hist[0], above, width, lane, &s_digit, &s_above);
         __syncthreads();
         prefix |= (uint32_t) s_digit << shift;
         above = s_above;
@@ -456,11 +459,12 @@ __global__ void __launch_bounds__(TK_T) block_topk_reg_kernel(const float* __res
 }
 
 // ---- a query with more blocks than the register kernel holds (contexts past 4 * 1024 * TK_PER cells): the register
-// kernel's threads, per-warp histograms and warp scans, with each key read from memory again on every pass.  A
-// histogram has no order, so on the four radix passes thread t reads blocks t, t + 1024, ...: a warp reads 32
-// neighbours at a time.  The cells are emitted ascending in the order (warp, row, lane): warp w holds the `per` rows
-// of 32 consecutive blocks from block w * 32 * per.  block_topk_kernel's selection rule (radix threshold, ties to the
-// lowest index): identical ids.
+// kernel's threads, per-warp histograms and digit search. Warp w owns the `per` rows of 32 consecutive blocks from block
+// w * 32 * per, lane l column l of each row; a thread's first KREG rows stay in registers, later ones are read from
+// memory on every pass. The cells are emitted ascending in the order (warp, row, lane). block_topk_kernel's selection
+// rule (radix threshold, ties to the lowest index): identical ids.
+constexpr int KREG = 8;
+template <int NR>
 __global__ void __launch_bounds__(TK_T) block_topk_wide_kernel(const float* __restrict__ scores,
                                                                const int32_t* __restrict__ steps, int64_t max_blocks,
                                                                int64_t cap, int32_t* __restrict__ ids) {
@@ -479,19 +483,34 @@ __global__ void __launch_bounds__(TK_T) block_topk_wide_kernel(const float* __re
     const float* sc = scores + qi * max_blocks;
     const int64_t nb = n_bid + 1;
     const int64_t per = (nb + TK_T - 1) / TK_T;       // rows of 32 blocks per warp
-    auto weight = [&](int64_t b) -> int { return b < n_bid ? R : (int) (n_kv - n_bid * R); };
+    const int64_t w0 = (int64_t) warp * 32 * per + lane;
+    auto weight = [&](int64_t b) -> int { return b < nb ? (b < n_bid ? R : (int) (n_kv - n_bid * R)) : 0; };
+    uint32_t kr[NR];
+#pragma unroll
+    for (int r = 0; r < NR; ++r) {
+        const int64_t b = w0 + 32 * r;
+        kr[r] = (r < per && b < nb) ? order_key(sc[b]) : 0u;
+    }
+    // f(block, key) over this thread's blocks
+    auto each = [&](auto&& f) {
+#pragma unroll
+        for (int r = 0; r < NR; ++r)
+            if (r < per) f(w0 + 32 * r, kr[r]);
+        for (int64_t r = NR; r < per; ++r) {
+            const int64_t b = w0 + 32 * r;
+            f(b, b < nb ? order_key(sc[b]) : 0u);
+        }
+    };
     uint32_t prefix = 0;
     int above = 0;
     for (int shift = 24; shift >= 0; shift -= 8) {
         for (int i = lane; i < 256; i += 32) hist[warp][i] = 0;
         __syncwarp();
         const uint32_t hi_mask = shift == 24 ? 0u : (0xffffffffu << (shift + 8));
-        for (int64_t b = t; b < nb; b += TK_T) {
+        each([&](int64_t b, uint32_t k) {
             const int w = weight(b);
-            if (w == 0) continue;
-            const uint32_t k = order_key(sc[b]);
-            if ((k & hi_mask) == (prefix & hi_mask)) atomicAdd(&hist[warp][(k >> shift) & 255], w);
-        }
+            if (w != 0 && (k & hi_mask) == (prefix & hi_mask)) atomicAdd(&hist[warp][(k >> shift) & 255], w);
+        });
         __syncthreads();
         if (t < 256) {                                // fold the warps' histograms into warp 0's
             int sum = 0;
@@ -499,15 +518,7 @@ __global__ void __launch_bounds__(TK_T) block_topk_wide_kernel(const float* __re
             hist[0][t] = sum;
         }
         __syncthreads();
-        if (t == 0) {
-            int cum = above, d = 255;
-            for (; d > 0; --d) {
-                if (cum + hist[0][d] >= width) break;
-                cum += hist[0][d];
-            }
-            s_digit = d;
-            s_above = cum;
-        }
+        if (warp == 0) pick_digit(hist[0], above, width, lane, &s_digit, &s_above);
         __syncthreads();
         prefix |= (uint32_t) s_digit << shift;
         above = s_above;
@@ -515,15 +526,12 @@ __global__ void __launch_bounds__(TK_T) block_topk_wide_kernel(const float* __re
     }
     const uint32_t thr = prefix;
     const int eq_budget = (int) (width - above);      // cells equal to thr that fit, lowest index first
-    const int64_t w0 = (int64_t) warp * 32 * per;
     int gt = 0, eq = 0;
-    for (int64_t b = w0 + lane; b < nb && b < w0 + 32 * per; b += 32) {
+    each([&](int64_t b, uint32_t k) {
         const int w = weight(b);
-        if (w == 0) continue;
-        const uint32_t k = order_key(sc[b]);
-        if (k > thr) gt += w;
-        else if (k == thr) eq += w;
-    }
+        if (w != 0 && k > thr) gt += w;
+        else if (w != 0 && k == thr) eq += w;
+    });
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) {
         gt += __shfl_xor_sync(0xffffffffu, gt, o);
@@ -544,12 +552,10 @@ __global__ void __launch_bounds__(TK_T) block_topk_wide_kernel(const float* __re
     }
     __syncthreads();
     int run_sel = s_gt[warp], run_eq = s_eq[warp];
-    for (int64_t r0 = w0; r0 < nb && r0 < w0 + 32 * per; r0 += 32) {
-        const int64_t b = r0 + lane;
-        const int w = b < nb ? weight(b) : 0;
-        const uint32_t k = w ? order_key(sc[b]) : 0u;
+    each([&](int64_t b, uint32_t k) {                 // a row per call, the same row on every lane
+        const int w = weight(b);
         const int my_gt = (w && k > thr) ? w : 0, my_eq = (w && k == thr) ? w : 0;
-        if (__ballot_sync(0xffffffffu, (my_gt | my_eq) != 0) == 0u) continue;   // a row without a selected block
+        if (__ballot_sync(0xffffffffu, (my_gt | my_eq) != 0) == 0u) return;   // a row without a selected block
         int pe = my_eq;                               // tied cells up to and with this lane
 #pragma unroll
         for (int o = 1; o < 32; o <<= 1) {
@@ -569,7 +575,7 @@ __global__ void __launch_bounds__(TK_T) block_topk_wide_kernel(const float* __re
         for (int c = 0; c < my_sel; ++c) dst[c] = (int32_t) (b * R + c);
         run_eq += __shfl_sync(0xffffffffu, pe, 31);
         run_sel += __shfl_sync(0xffffffffu, ps, 31);
-    }
+    });
 }
 
 
@@ -1243,7 +1249,7 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
         std::exit(1);
     }
     if (reach > fit)   // past the register kernel's reach
-        basalt::kernels::launch_cc(block_topk_wide_kernel, (unsigned) nq, TK_T, 0, (cudaStream_t) stream, scores, steps, max_blocks, cap, ids);
+        basalt::kernels::launch_cc(block_topk_wide_kernel<KREG>, (unsigned) nq, TK_T, 0, (cudaStream_t) stream, scores, steps, max_blocks, cap, ids);
     else
     if (reach <= (int64_t) TK_T * TK_PER)
         basalt::kernels::launch_cc(block_topk_reg_kernel<TK_PER>, (unsigned) nq, TK_T, 0, (cudaStream_t) stream, scores, steps, max_blocks, cap, ids);
