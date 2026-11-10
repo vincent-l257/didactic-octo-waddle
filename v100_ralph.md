@@ -290,8 +290,10 @@ the lent experts stream from RAM every chunk, whatever the layer count. Full-att
 - Done 11-10: layer-split prompt chunk = prompt/4 in [512, 3072] (stages overlap). IQ4_XS 10,29, no profiler,
   prompt tok/s at 8192 -> now: 1.4k 827 -> 1013, 4k ~980 -> ~1590, 18k 1822 -> 2458, 88k ~1.6-2k -> 2734.
   Q6_K gemv rows staged in smem (16 B loads): bitwise, slower on all cards; T=1 already ~600 GB/s on the V100.
-5. Rebalance layer split once the V100 is faster (more layers to it). IQ4_XS: only with a cap on the V100 cache
-   so its prompt path never borrows (10,29 lends and streams over x1).
+- Done 11-10, fixed costs per request (~250 ms -> ~12): stage checkpoints deferred (126 -> 9 ms), loans refilled as
+  each stage finishes, residency upload only to cards that lent (the V100's waited 105 ms behind the checkpoint copy
+  on x1). 1.4k 1013 -> 1170, 4k ~1590 -> ~1800 tok/s. A continuing turn restores GDN from the device copy: 382 -> 247 ms.
+5. Rebalance layer split once the V100 is faster (IQ4_XS: cap the V100 cache so its prompt path never borrows).
 6. Decode kernels on the V100 (qsa_dec_attn, head).
 
 ## Not to do
