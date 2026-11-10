@@ -640,17 +640,24 @@ __device__ void dm_glue_ring_pub(const DmRouteArgs& a, const void* xq, int tid, 
 
 // native_gu2_kernel's rows with the VRAM plan built in the block (dm_route_kernel's kinds and dm_group for the VRAM
 // tier: an entry is CUDA0's when its id is valid, not repeated within its token and ptab holds its blob).  The blocks
-// are co-resident and loop over the (row block, group) items, so each plans once.  Two blocks an SM: the row loop
-// keeps its full register budget.
+// are co-resident and loop over the (row block, group) items, so each plans once.  From cc 9 two blocks an SM: the
+// row loop keeps its full register budget.
 //
 // The plan keeps one mask of tokens per expert id (shared atomics, so no pass over the other entries); each entry
 // reads its rank, its group's size and whether it opens the group off that mask.  Group indices and starts come from
 // warp scans and the warp totals.  Entry order, group order and places are those of dm_group_keys.
+// Below cc 9 the rows take a half-warp each (gu2::pair_half, the same bits) in four blocks an SM: there the row loads
+// are latency-bound and the half-warp rows fit in 64 registers.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+#define DM_GLUE_MINB 4
+#else
+#define DM_GLUE_MINB 2
+#endif
 constexpr int kDmGlueExperts = 1024;   // expert ids the mask table covers
 constexpr int kDmGlueTokens = 16;      // tokens a mask holds
 
 template<int TG>
-__global__ void __launch_bounds__(256, 2) dm_glue_gu_kernel(DmGlueArgs a, NativeExpertLayout L,
+__global__ void __launch_bounds__(256, DM_GLUE_MINB) dm_glue_gu_kernel(DmGlueArgs a, NativeExpertLayout L,
                                                             float* __restrict__ gate, float* __restrict__ up,
                                                             block_q8_1* __restrict__ hq) {
     __shared__ int32_t s_ids[kDmCap], s_start[kDmCap + 1], s_tok[kDmCap];
@@ -756,9 +763,14 @@ __global__ void __launch_bounds__(256, 2) dm_glue_gu_kernel(DmGlueArgs a, Native
     for (int it = blockIdx.x; it < items; it += nwork) {
         const int bx = it % nx, g = it / nx;
         const int row = bx * GU2_ROWS + 2 * warp;   // rows row, row + 1: both gate or both up
-        if (row < 2 * L.n_ff)
-            gu2::pair<TG>((const uint8_t*) s_ptr[g], row, s_start[g], s_start[g + 1], s_tok, xq, L, gate, up, s_grid,
-                          lane);
+        if (row < 2 * L.n_ff) {
+            if constexpr (DM_GLUE_MINB == 4)
+                gu2::pair_half<TG>((const uint8_t*) s_ptr[g], row, s_start[g], s_start[g + 1], s_tok, xq, L, gate, up,
+                                   s_grid, lane);
+            else
+                gu2::pair<TG>((const uint8_t*) s_ptr[g], row, s_start[g], s_start[g + 1], s_tok, xq, L, gate, up, s_grid,
+                              lane);
+        }
     }
 }
 

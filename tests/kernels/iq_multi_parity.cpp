@@ -11,6 +11,9 @@
 // (2) native_expert_grouped, every gate/up format with the down formats: groups of 0..11 entries (more than a pass
 //     of GRP_NC), unused grid rows (cap_groups > groups), scattered destinations; bitwise, new vs old, the rows it
 //     must not write included.
+// (2b) dec_moe_glue (the decode tail's gate/up launch that plans the window itself, then SwiGLU and down) on windows of
+//     1..4 and 8 tokens x 10 experts with experts shared between tokens: bitwise against native_expert_grouped's
+//     old kernels on the same plan.
 // (3) iq_mmvq's IQ3_S columns on the tensor-core kernel (MMVQ_MMA, turned on here where the device has it)
 //     against the old kernel, bitwise; with MMVQ_MMA=1 in the environment (1) takes it as well.
 //
@@ -19,6 +22,7 @@
 //
 // Random bytes are valid codes for every format here (all grid indices are in range); only the fp16 block scales
 // are set, small enough that the grouped path's SwiGLU output keeps a finite fp16 q8_1 scale.
+#include "basalt/kernels/dec_moe.hpp"
 #include "basalt/kernels/f16_bits.hpp"
 #include "basalt/kernels/iq_kernels.hpp"
 #include "basalt/kernels/native_mmvq.hpp"
@@ -402,6 +406,100 @@ void check_grouped(int gu, int dt, int64_t H, int64_t FF, cudaStream_t s, std::m
     }
 }
 
+// ------------------------------------------------------------------------------------------- (2b) dec_moe_glue
+void check_glue(int gu, int dt, int n_tok, cudaStream_t s, std::mt19937& rng) {
+    const int64_t H = 2560, FF = 640;
+    const int K = 10, NX = 48, n = n_tok * K;
+    const k::NativeExpertLayout L = k::native_expert_layout(gu, dt, H, FF);
+    if (!k::dec_moe_glue_ok(L)) {
+        std::printf("%-8s/%-7s dec_moe_glue: not taken, skipped\n", name_of(gu), name_of(dt));
+        return;
+    }
+    // routing: K distinct experts a token out of NX, so tokens share some
+    std::vector<int32_t> ids(n);
+    for (int t = 0; t < n_tok; ++t)
+        for (int j = 0; j < K; ++j) {
+            int id;
+            do id = (int) (rng() % NX);
+            while (std::find(ids.begin() + t * K, ids.begin() + t * K + j, id) != ids.begin() + t * K + j);
+            ids[t * K + j] = id;
+        }
+    // the plan the glue makes: groups by first appearance, a group's entries in token order, rows at the entry index
+    std::vector<int> order;
+    for (int i = 0; i < n; ++i)
+        if (std::find(order.begin(), order.end(), ids[i]) == order.end()) order.push_back(ids[i]);
+    std::vector<int32_t> start(1, 0), tok, dst;
+    for (int g : order) {
+        for (int i = 0; i < n; ++i)
+            if (ids[i] == g) { tok.push_back(i / K); dst.push_back(i); }
+        start.push_back((int32_t) dst.size());
+    }
+    const int ng = (int) order.size();
+    std::vector<uint8_t*> blobs(NX);
+    std::vector<unsigned long long> ptab(NX), ptr;
+    for (int e = 0; e < NX; ++e) {
+        auto b = random_rows(gu, 2 * FF, H, rng);
+        const auto d = random_rows(dt, H, FF, rng);
+        b.insert(b.end(), d.begin(), d.end());
+        blobs[e] = dalloc<uint8_t>(b.size());
+        ck(cudaMemcpy(blobs[e], b.data(), b.size(), cudaMemcpyHostToDevice), "blob");
+        ptab[e] = (unsigned long long) blobs[e];
+    }
+    for (int g : order) ptr.push_back(ptab[g]);
+    auto up = [&](const auto& v) {
+        using T = typename std::decay_t<decltype(v)>::value_type;
+        T* d = dalloc<T>(v.size());
+        ck(cudaMemcpy(d, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice), "up");
+        return d;
+    };
+    int32_t* d_ids = up(ids);
+    unsigned long long* d_ptab = up(ptab);
+    unsigned long long* d_ptr = up(ptr);
+    int32_t *d_start = up(start), *d_tok = up(tok), *d_dst = up(dst), *d_ng = up(std::vector<int32_t>{ng});
+    k::DmPlan* d_plan = dalloc<k::DmPlan>(1);
+    const auto x = random_x((size_t) n_tok * H, rng);
+    float* dx = up(x);
+    uint8_t* dxq = dalloc<uint8_t>((size_t) n_tok * (H / 32) * 36);
+    k::quantize_q8_1_rows(dx, n_tok, H, dxq, s);
+    const size_t scr = k::native_expert_scratch_bytes(n, FF), outn = (size_t) n * H;
+    uint8_t* dscr = dalloc<uint8_t>(scr);
+    float* dout = dalloc<float>(outn);
+    auto result = [&](bool glue) {
+        ck(cudaMemset(dout, 0xFF, outn * 4), "memset");
+        ck(cudaMemset(dscr, 0, scr), "memset");
+        if (glue) {
+            k::DmGlueArgs ga;
+            ga.ids = d_ids; ga.ptab = d_ptab; ga.n_tok = n_tok; ga.k = K; ga.n_expert = NX; ga.plan = d_plan; ga.xq = dxq;
+            k::dec_moe_glue(L, ga, dscr, dout, n, s);
+        } else {
+            k::iq_set_old_kernels(true);
+            k::native_expert_grouped(L, d_ptr, d_start, d_ng, d_dst, d_tok, ng, n, dxq, dscr, dout, s);
+            k::iq_set_old_kernels(false);
+        }
+        ck(cudaStreamSynchronize(s), "sync");
+        std::vector<float> o(outn);
+        ck(cudaMemcpy(o.data(), dout, outn * 4, cudaMemcpyDeviceToHost), "out");
+        return o;
+    };
+    const auto a = result(false), b = result(true);
+    size_t diff = 0;
+    bool finite = true;
+    for (size_t i = 0; i < outn; ++i) {
+        diff += std::memcmp(&a[i], &b[i], 4) != 0;
+        finite = finite && std::isfinite(b[i]);
+    }
+    const bool ok = diff == 0 && finite;
+    std::printf("%-8s/%-7s %5lld x %4lld  dec_moe_glue, %d tokens, %d groups: %s\n", name_of(gu), name_of(dt),
+                (long long) H, (long long) FF, n_tok, ng, ok ? "bitwise equal to the old kernels" : "FAIL");
+    if (!ok) {
+        std::printf("  %zu of %zu floats differ%s\n", diff, outn, finite ? "" : ", non-finite outputs");
+        ++g_fail;
+    }
+    for (auto* p : blobs) cudaFree(p);
+    cudaFree(d_ids); cudaFree(d_ptab); cudaFree(d_ptr); cudaFree(d_start); cudaFree(d_tok); cudaFree(d_dst); cudaFree(d_ng);
+    cudaFree(d_plan); cudaFree(dx); cudaFree(dxq); cudaFree(dscr); cudaFree(dout);
+}
+
 // ------------------------------------------------------------------------------------------------ --bench
 float time_ms(cudaStream_t s, int it, const auto& fn) {
     cudaEvent_t e0, e1;
@@ -574,6 +672,9 @@ int main(int argc, char** argv) {
         check_grouped(gu, dt, 2560, 640, s, rng);
         check_grouped(gu, dt, 1024, 512, s, rng);
     }
+    for (int gu : {18, 22})                                                  // the glue's grid formats, the model's shape
+        for (int dt : {20, 6, 42})
+            for (int nt : {1, 2, 3, 4, 8}) check_glue(gu, dt, nt, s, rng);
     check_grouped(40, 40, 2560, 640, s, rng);                               // NVFP4: its own pair, with the scale tail
     check_grouped(40, 40, 1024, 512, s, rng);
     check_mmvq_mma(s, rng);
