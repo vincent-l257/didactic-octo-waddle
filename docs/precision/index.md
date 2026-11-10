@@ -176,6 +176,8 @@ tokens on such a pack is chunked differently and its K/V can differ in the last 
 read that runs alone chunks as the single-stream path does; a read beside decoding slots takes the smaller chunk its
 capped loan allows, so the same prompt's K/V can differ in the last bits between the two. A read beside decoding slots
 that gives way to a shorter request reads its rest later in the same chunks, beside the slots, with no CPU share.
+A layer split caps the chunk at a quarter of the prompt, between 512 and 3,072 tokens, so its stages overlap; its
+prompts chunk differently from the `--prefill` setting and their K/V can differ in the last bits.
 
 **Short first chunk.** A prompt above the chunk cap (and at least 32,768 tokens) reads its first 16,384 tokens as one
 chunk and the rest in equal chunks of at most the cap, so the first chunk waits for fewer PLE rows. This moves the chunk

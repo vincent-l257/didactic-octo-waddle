@@ -145,6 +145,8 @@ bool Request::lend(int64_t tokens, std::string& e, int64_t chunk, int64_t head) 
     // `auto:N` and a fixed N keep the operator's number.  (Chunking changes the GEMM tiles and so the rounding of
     // a prompt's K/V; the answers can differ from another chunking by greedy near-ties.)
     int64_t cap = runtime_.read_cap();
+    if (!runtime_.stages.empty())
+        cap = std::min(cap, std::max(runtime_.kPipeChunkMin, std::min(runtime_.kPipeChunkMax, (tokens + 3) / 4)));
     // Loan limits while slots decode: the loan takes only slots whose expert has a RAM copy (a lent slot
     // is refilled from RAM, never read from the file, before the slots decode again), and a read beside
     // them stays within kLendCapDecoding slots (they keep their experts in the cache).  A read on an idle

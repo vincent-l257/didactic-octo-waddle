@@ -188,6 +188,9 @@ private:
     // most) and it lends and reads as on an idle engine.  A longer read goes beside them, within the limits above,
     // and so does the rest of one that gave way to a shorter request (in its chunk).
     static constexpr int64_t kReadAlone = 16384;
+    // A layer split reads its stages as a pipeline over a prompt's chunks: about four chunks keep every card busy,
+    // and past kPipeChunkMax a chunk's cost per token stops falling.
+    static constexpr int64_t kPipeChunkMin = 512, kPipeChunkMax = 3072;
     bool any_loan{};
     static constexpr int64_t kStepChunks[] = {6144, 4096, 3072, 2048, 1536, 1024, 512};
     int64_t split_chunk_max{};
