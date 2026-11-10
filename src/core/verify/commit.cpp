@@ -180,10 +180,12 @@ bool Verifier::commit(int n_keep, std::string& err, int parts) {
         }
         if (le != cudaSuccess) { err = std::string("verify: commit launch: ") + cudaGetErrorString(le); return false; }
         // set_commit_async: no wait here - the next window's first node waits for the epoch (the host names it in
-        // h_pend_), and the drafter (its own stream) reads only this window's final rows and its own K/V.  h_commit_ is
-        // next written after the next window's results are read, i.e. after this graph has run.  Everything else waits
-        // on commit_done_ (wait_commit).
-        if (!g_commit_async || next_ != nullptr) {
+        // h_pend_; a split stage's window waits on commit_done_ instead, run_begin), and the drafter (its own stream)
+        // reads only this window's final rows and its own K/V.  h_commit_ is next written after the next window's
+        // results are read, i.e. after this graph has run.  Everything else waits on commit_done_ (wait_commit).
+        // A layer-split stage commits this way whatever the setting.
+        const bool split_stage = next_ != nullptr || lb_ > 0;
+        if (!g_commit_async && !split_stage) {
             const cudaError_t se = cudaStreamSynchronize(cm_);
             if (se != cudaSuccess) { err = std::string("verify: commit: ") + cudaGetErrorString(se); return false; }
         } else {
