@@ -121,7 +121,7 @@ Decode 11-09 (IQ4_XS 10,29, 18k; V100 10.52 ms/window, 87.6 tok/s; 250/350/300 W
 - Done: hc8 read rewrite (-0.84 ms), native_gu_multi_kernel 4 blocks/SM on sm_70 (IQ4_XS gate/up 101 -> 81 us, -0.12).
 - Done, bitwise: Q5_0 Split (down took the per-entry kernel: 2 tokens an expert 101 -> 74 us V100, 82 -> 55 3090);
   gu2 a half-warp a row, 64 regs (IQ3_XXS gu 84 -> 74 us); hc8 down slice padded in smem (-1.3 us a read). Window
-  25.60 -> 25.07 ms. Down below cc 9: 3 entries a pass, 4 blocks/SM (IQ4_NL 59 -> 48 us; V100 stage 10.30 ms). No gain:
+  25.60 -> 25.07 ms. Down below cc 9: 3 entries a pass, 4 blocks/SM (IQ4_NL 59 -> 48 us; V100 10.30 ms, window 24.53 ms, 89.6 t/s). No gain:
   IQ4_XS on gu2 or 3 a pass; hc8 in one launch (-1 us a read); IQ3_XXS lookups (8 us); Q6_K mmvq at 6-8 blocks/SM.
 - Dense: the UD pack's projections run Q6_K (its GGUF section; 86 launches/window). T=3 at 1.8x the HBM floor (qkv 47
   vs 27 us). Tried, bitwise, no gain: activations in smem + warp per row, int->float by magic add, 2-4 rows a warp
