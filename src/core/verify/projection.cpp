@@ -25,8 +25,7 @@ void note_fallback(const char* what, int a, int b) {
 void dense_proj(int bit, int type, const void* w, const void* xq, float* y, int n_in, int n_out, int n, void* s) {
     dense_proj(bit, type, w, xq, nullptr, y, n_in, n_out, n, s);
 }
-// with xh: Q6_K on fp16 tensor cores on a cc 7.0 card for 2 to 8 columns (q6k_f16.hpp); a window of one column stays on
-// native_mmvq
+// with xh: Q6_K on fp16 tensor cores on a cc 7.0 card for every window width (q6k_f16.hpp)
 void dense_proj(int bit, int type, const void* w, const void* xq, const void* xh, float* y, int n_in, int n_out, int n,
                 void* s) {
     if ((kernels::dense_tc_mask() & bit) && kernels::dense_tc_supported(type, n_in, n_out, w) &&

@@ -3,7 +3,7 @@
 //     build/q6k_f16_parity [--bench]
 //
 // Random Q6_K blocks (normal fp16 scales) and normal activations with sparse 8x outliers, at the model's projection
-// shapes.  Per case and T = 2..8:
+// shapes.  Per case and T = 1..8:
 //   - the relative RMS of q6k_f16 against a double reference over the dequantized weights and the fp32 activations;
 //     it fails above 2e-3, or above the q8_1 path's (native_mmvq on native_quantize_q8_1) relative RMS;
 //   - every column of a T-column call is bitwise equal to the same column of the 8-column call.
@@ -168,7 +168,7 @@ int main(int argc, char** argv) {
         cudaMemcpy(x, hx.data(), hx.size() * 4, cudaMemcpyHostToDevice);
         // a pageable copy can return before it lands; the work below runs on a non-blocking stream
         if (!ck(cudaDeviceSynchronize(), "copies")) return 1;
-        if (!q6k_f16_supported(14, c.n_in, c.n_out, 2, w[0])) {
+        if (!q6k_f16_supported(14, c.n_in, c.n_out, 1, w[0])) {
             std::printf("%-10s not supported\n", c.name);
             return 1;
         }
@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
         if (!ck(cudaStreamSynchronize(s), "8 columns") ||
             !ck(cudaMemcpy(h8.data(), y8, h8.size() * 4, cudaMemcpyDeviceToHost), "y8"))
             return 1;
-        for (int T = 2; T <= 8; ++T) {
+        for (int T = 1; T <= 8; ++T) {
             q6k_f16_prep(x, xh, c.n_in, T, s);
             q6k_f16(w[0], xh, y, c.n_in, c.n_out, T, s);
             native_quantize_q8_1(x, xq, c.n_in, T, s);

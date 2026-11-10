@@ -85,22 +85,22 @@ grammar form) is not enforced.
 
 ## Q6_K dense projections on fp16 tensor cores (cc 7.0)
 
-On a compute capability 7.0 card, a verify window of 2 to 8 rows runs its Q6_K GDN qkv, GDN z and QSA query
-projections without q8_1. **Numerics change against native_mmvq** on these three projections:
+On a compute capability 7.0 card, every verify window runs its Q6_K GDN qkv, GDN z and QSA query projections without
+q8_1. **Numerics change against native_mmvq** on these three projections:
 
 - Weights: each Q6_K value dequantized to fp16 as fp16((q - 32) * fp16(d * sc)): the block scale times the signed
   sub-block scale rounded once to fp16, the product rounded once more.
 - Activations: the layer's fp32 mixed rows rounded to fp16 (round to nearest), no per-32 int8 codes.
 - Products: mma.sync m8n8k4 (fp16 inputs, fp32 accumulate); the partial sums added in an order set by the shape, so
-  every column is the same bits whatever the window width from 2 to 8.
-- Unchanged: one-row windows, GDN ssm_out, QSA k/v/o, the shared expert, other weight types and every cc 8.x/12.x
+  every column is the same bits whatever the window width from 1 to 8.
+- Unchanged: GDN ssm_out, QSA k/v/o, the shared expert, other weight types and every cc 8.x/12.x
   card stay on native_mmvq or dense_tc.
 
 Against a double reference over the dequantized weights and the fp32 activations (q6k_f16_parity: random Q6_K
-blocks, normal activations with every 97th value 8 times larger, T = 2..8, shapes 2560 -> 10240, 6144, 12288, 4096
+blocks, normal activations with every 97th value 8 times larger, T = 1..8, shapes 2560 -> 10240, 6144, 12288, 4096
 and 1024 -> 4100): relative RMS 3.5-3.6e-4 for this path, 8.1-9.5e-3 for native_mmvq on the q8_1 codes of the same
-rows. A row's logits depend on whether its window had one row or more (one-row windows keep q8_1), so on these cards
-verify is not bitwise width-invariant ([Speculative decoding](#speculative-decoding-does-not-change-output)).
+rows. Every window width takes this arithmetic, so the width guarantee of
+[Speculative decoding](#speculative-decoding-does-not-change-output) holds on these cards too.
 
 Quality gate (decode path, cc 7.0): _pending, the maintainer's PPL/KLD run_.
 
@@ -115,9 +115,7 @@ mid chain. Windows of five to eight rows do too below 160 SMs; at 160 SMs or mor
 kernels, whose output projection already has the mid chain's reduction order. The width guarantee holds on every device for this path. Profiled runs (`--profile`), batched windows (`--batch`) and a GDN
 mixer split across two cards run the three separate kernels instead; on a device with fewer than 160 SMs their output
 projection rounds differently from the mid chain, so those runs are exact among themselves but not bitwise equal to a
-plain run there. On a cc 7.0 card windows of two rows or more take the fp16 Q6_K projections
-([above](#q6_k-dense-projections-on-fp16-tensor-cores-cc-70)) and one-row windows q8_1, so the guarantee does not
-hold there.
+plain run there.
 
 The default window is 8 tokens (`--spec 8`; an explicit `--spec N` is used as given). Greedy decoding with the drafter
 stays exact at any window. A sampled request is still drawn from the model's own distribution, but the window length

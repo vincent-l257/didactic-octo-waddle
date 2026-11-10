@@ -183,7 +183,7 @@ void fail(const char* what, cudaError_t e) {
 }  // namespace
 
 bool q6k_f16_supported(int t, int n_in, int n_out, int ncols, const void* w) noexcept {
-    return t == 14 && ncols >= 2 && ncols <= 8 && n_in > 0 && n_in % 512 == 0 && n_out >= 4096 &&
+    return t == 14 && ncols >= 1 && ncols <= 8 && n_in > 0 && n_in % 512 == 0 && n_out >= 4096 &&
            ((uintptr_t) w & 3) == 0 && cc7_device();
 }
 

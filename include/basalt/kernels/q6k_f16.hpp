@@ -12,7 +12,7 @@
 
 namespace basalt::kernels {
 
-/// This card and call take the fp16 path: a cc 7.0 device, Q6_K (type 14), 2 <= ncols <= 8, n_in a multiple of 512,
+/// This card and call take the fp16 path: a cc 7.0 device, Q6_K (type 14), 1 <= ncols <= 8, n_in a multiple of 512,
 /// n_out >= 4096, weights 4-byte aligned.
 bool q6k_f16_supported(int ggml_type, int n_in, int n_out, int ncols, const void* weights) noexcept;
 

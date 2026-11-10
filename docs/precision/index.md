@@ -72,7 +72,7 @@ The drafter only proposes tokens; verify decides every token, so the drafter's p
 | Router | fp32 times BF16 weight, fp32 FMA | hc_fused.cu:765-838; native_bf16.cu:45-122 |
 | GDN qkv, QSA q, GDN ssm_out, QSA o | q8_1: int8 codes with an fp16 scale per 32 values, int8 tensor-core dot (dense_tc). The QSA query projection of a decode window runs as two launches, its query rows and then its gate rows beside the attention, each 16-row tile with dense_tc's arithmetic: the same bits | native_mmvq.cu:147-160; dense_tc.hpp:2-12; qsa_mid.cu |
 | GDN z, QSA k/v | z through dense_tc together with qkv when eligible; otherwise native_mmvq (dp4a on q8_1) | dense_tc.cu:1147-1152; verify/record_gdn.cpp, verify/record_qsa.cpp |
-| GDN qkv/z, QSA q on cc 7.0 (Q6_K, windows of 2-8 rows) | fp16 rows of the fp32 input, Q6_K dequantized to fp16, fp16 tensor-core mma with fp32 accumulate; no q8_1 ([details](features.md#q6_k-dense-projections-on-fp16-tensor-cores-cc-70)) | q6k_f16.cu; verify/projection.cpp |
+| GDN qkv/z, QSA q on cc 7.0 (Q6_K, every window width) | fp16 rows of the fp32 input, Q6_K dequantized to fp16, fp16 tensor-core mma with fp32 accumulate; no q8_1 ([details](features.md#q6_k-dense-projections-on-fp16-tensor-cores-cc-70)) | q6k_f16.cu; verify/projection.cpp |
 | Routed experts gate/up | q8_1 of the fp32 FFN input; dp4a with exact int32 per block | hc_fused.cu:67-81; iq_kernels.cu:201-226 |
 | Routed experts down | fp32 SwiGLU, then q8_1 per 32 | iq_kernels.cu:1881-1913 |
 | Shared expert | q8_1 into gate/up; fp32 SwiGLU, q8_1 into down; sigmoid gate fp32 | shared_expert.cu:104-144, 210-234 |
