@@ -122,15 +122,19 @@ __global__ void bf16_f32_mmvf_multi_kernel(const float* __restrict__ x, int64_t 
 }
 
 // bf16_f32_mmvf_multi_kernel with n_in = 2 * BLOCK_SIZE * NP and exactly NT rows: each thread loads its weight pairs
-// before its multiply-adds; every output's chain and reductions are the multi kernel's
-template <int BLOCK_SIZE, int NT, int NP>
+// before its multiply-adds; every output's chain and reductions are the multi kernel's.  SH: the grid's last block
+// dots the row w_sh instead and writes its sigmoid to g_sh[k], as the shared expert's gate kernel computes it.
+template <int BLOCK_SIZE, int NT, int NP, bool SH = false>
 __global__ void __launch_bounds__(BLOCK_SIZE) bf16_f32_mmvf_fixed_kernel(const float* __restrict__ x, int64_t ldx,
                                                                          const uint16_t* __restrict__ w,
-                                                                         float* __restrict__ y, int64_t ldy) {
+                                                                         float* __restrict__ y, int64_t ldy,
+                                                                         const uint16_t* __restrict__ w_sh,
+                                                                         float* __restrict__ g_sh) {
     constexpr int n_in = 2 * BLOCK_SIZE * NP;
     pdl_wait();
     const int t = threadIdx.x;
-    const uint32_t* weights2 = reinterpret_cast<const uint32_t*>(w + (size_t) blockIdx.x * n_in);
+    const bool sh = SH && blockIdx.x == gridDim.x - 1;
+    const uint32_t* weights2 = reinterpret_cast<const uint32_t*>(sh ? w_sh : w + (size_t) blockIdx.x * n_in);
     __shared__ float partials[NT][32];
     if (t < 32)
 #pragma unroll
@@ -162,7 +166,10 @@ __global__ void __launch_bounds__(BLOCK_SIZE) bf16_f32_mmvf_fixed_kernel(const f
 #pragma unroll
         for (int k = 0; k < NT; ++k) {
             const float v = mmvf_warp_sum(partials[k][t]);
-            if (t == 0) y[(size_t) k * ldy + blockIdx.x] = v;
+            if (t == 0) {
+                if (sh) g_sh[k] = __fdividef(1.0f, 1.0f + __expf(-v));
+                else y[(size_t) k * ldy + blockIdx.x] = v;
+            }
         }
 }
 
@@ -189,10 +196,12 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
         (reinterpret_cast<uintptr_t>(w) & 3u) == 0 && (reinterpret_cast<uintptr_t>(y) & 3u) == 0) {
         const cudaStream_t st = (cudaStream_t) stream;
         const dim3 grid((unsigned) n_out), block(256);
-        if (n_tok == 1) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 1, 5>, grid, block, 0, st, x, ldx, w, y, ldy);
-        else if (n_tok == 2) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 2, 5>, grid, block, 0, st, x, ldx, w, y, ldy);
-        else if (n_tok == 3) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 3, 5>, grid, block, 0, st, x, ldx, w, y, ldy);
-        else launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 4, 5>, grid, block, 0, st, x, ldx, w, y, ldy);
+        const uint16_t* nullw = nullptr;
+        float* nullg = nullptr;
+        if (n_tok == 1) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 1, 5>, grid, block, 0, st, x, ldx, w, y, ldy, nullw, nullg);
+        else if (n_tok == 2) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 2, 5>, grid, block, 0, st, x, ldx, w, y, ldy, nullw, nullg);
+        else if (n_tok == 3) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 3, 5>, grid, block, 0, st, x, ldx, w, y, ldy, nullw, nullg);
+        else launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 4, 5>, grid, block, 0, st, x, ldx, w, y, ldy, nullw, nullg);
         const cudaError_t result = cudaGetLastError();
         if (result != cudaSuccess)
             throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
@@ -217,6 +226,27 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
     const cudaError_t result = cudaGetLastError();
     if (result != cudaSuccess)
         throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
+}
+
+bool bf16_gemv_fp32_mmvf_gate_ok(int64_t n_in, int n_tok) { return n_in == 2560 && n_tok >= 1 && n_tok <= 4; }
+
+void bf16_gemv_fp32_mmvf_gate(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy, int64_t n_in,
+                              int64_t n_out, int n_tok, const uint16_t* w_sh, float* g_sh, void* stream) {
+    if (!bf16_gemv_fp32_mmvf_gate_ok(n_in, n_tok) || n_out <= 0 || n_out >= std::numeric_limits<int>::max() ||
+        (ldx & 1) != 0 || x == nullptr || w == nullptr || y == nullptr || w_sh == nullptr || g_sh == nullptr ||
+        (reinterpret_cast<uintptr_t>(x) & 7u) != 0 || (reinterpret_cast<uintptr_t>(w) & 3u) != 0 ||
+        (reinterpret_cast<uintptr_t>(w_sh) & 3u) != 0 || (reinterpret_cast<uintptr_t>(y) & 3u) != 0 ||
+        (reinterpret_cast<uintptr_t>(g_sh) & 3u) != 0)
+        throw std::invalid_argument("bf16_gemv_fp32_mmvf_gate: n_in 2560, 1..4 rows, aligned pointers");
+    const cudaStream_t st = (cudaStream_t) stream;
+    const dim3 grid((unsigned) n_out + 1u), block(256);
+    if (n_tok == 1) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 1, 5, true>, grid, block, 0, st, x, ldx, w, y, ldy, w_sh, g_sh);
+    else if (n_tok == 2) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 2, 5, true>, grid, block, 0, st, x, ldx, w, y, ldy, w_sh, g_sh);
+    else if (n_tok == 3) launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 3, 5, true>, grid, block, 0, st, x, ldx, w, y, ldy, w_sh, g_sh);
+    else launch_pdl(bf16_f32_mmvf_fixed_kernel<256, 4, 5, true>, grid, block, 0, st, x, ldx, w, y, ldy, w_sh, g_sh);
+    const cudaError_t result = cudaGetLastError();
+    if (result != cudaSuccess)
+        throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_gate launch: ") + cudaGetErrorString(result));
 }
 
 void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y,

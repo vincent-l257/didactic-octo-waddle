@@ -625,6 +625,7 @@ private:
     uint32_t commit_epoch_ = 0;
     int fin_blocks_ = 0;
     int mid_max_t_ = 4;
+    bool up_beside_ = true;   // the shared expert's up projection on a branch of its own beside the gate's
     // Lazy GDN layers (lazy_on): the commit graph and the finisher take only the first GDN layer; the later ones are
     // committed inside the next solo window, on lz_s_ from the previous layer's FFN read (that layer's own items and,
     // until the previous layer's combine has its CPU rows, later ones), joined before the layer's GDN kernels.  The

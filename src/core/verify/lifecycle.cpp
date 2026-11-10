@@ -322,6 +322,9 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         int sms = 0;
         cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device_ >= 0 ? device_ : 0);
         fin_blocks_ = sms;
+        int major = 0;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device_ >= 0 ? device_ : 0);
+        up_beside_ = major >= 8;   // below, the branch's fork and join cost more than the overlap saves
         mid_max_t_ = sms < 160 ? basalt::kernels::kMidChainMaxT : 4;
     }
     if (!basalt::kernels::gdn_commit_lazy_none(commit_ctl_) ||

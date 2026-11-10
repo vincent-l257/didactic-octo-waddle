@@ -74,7 +74,7 @@ struct Verifier::WindowRecorder {
     bool ring_fork = false;   // the group's ring stream is joined in post
     int mid_ord = 0;   // the mid chain's launches so far in this graph
     bool glue_on = false;   // post's gate/up launch plans the group's VRAM share
-    bool sh_read = false;   // the FFN read gave the shared expert its gate and q8_1 rows; post's combine gates it
+    bool sh_read = false;   // the FFN read (or the router's GEMV) gave the shared expert its gate; post's combine gates it
     kernels::DmRouteArgs glue_ring;   // the ring's work for post's gate/up launch
 
     bool fuse_head_gr = false;

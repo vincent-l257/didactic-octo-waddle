@@ -52,5 +52,11 @@ void bf16_gemv_fp32_mmvf_cols(const float* x, const uint16_t* w, float* y, int64
 /// the weight read once, every output bit-identical to its own single-row call.
 void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy,
                                int64_t n_in, int64_t n_out, int n_tok, void* stream);
+/// bf16_gemv_fp32_mmvf_multi (y bitwise its call) with one more output row per token: the dot of x[t * ldx] with
+/// the row w_sh, whose sigmoid goes to g_sh[t] bitwise as shared_expert_multi's gate computes it.  The inputs
+/// bf16_gemv_fp32_mmvf_gate_ok accepts only (n_in 2560, 1..4 rows).
+bool bf16_gemv_fp32_mmvf_gate_ok(int64_t n_in, int n_tok);
+void bf16_gemv_fp32_mmvf_gate(const float* x, int64_t ldx, const uint16_t* w, float* y, int64_t ldy, int64_t n_in,
+                              int64_t n_out, int n_tok, const uint16_t* w_sh, float* g_sh, void* stream);
 
 }  // namespace basalt::kernels

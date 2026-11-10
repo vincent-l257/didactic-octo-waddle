@@ -924,6 +924,11 @@ target_include_directories(bf16_gemv_parity PRIVATE ${_gpu_include_directories})
 target_link_libraries(bf16_gemv_parity PRIVATE kernels ${_gpu_runtime_target})
 basalt_gpu_test(NAME bf16_gemv_parity COMMAND bf16_gemv_parity --selftest)
 
+add_executable(router_shared_gate_parity tests/kernels/router_shared_gate_parity.cpp)
+target_include_directories(router_shared_gate_parity PRIVATE ${_gpu_include_directories})
+target_link_libraries(router_shared_gate_parity PRIVATE kernels ${_gpu_runtime_target})
+basalt_gpu_test(NAME router_shared_gate_parity COMMAND router_shared_gate_parity)
+
 add_executable(s_gemv_q8k_parity tests/kernels/s_gemv_q8k_parity.cpp)
 target_include_directories(s_gemv_q8k_parity PRIVATE ${_gpu_include_directories})
 target_link_libraries(s_gemv_q8k_parity PRIVATE kernels ${_gpu_runtime_target})

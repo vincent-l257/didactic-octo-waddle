@@ -243,6 +243,12 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
     // its three projections (gate and up side by side), and post's combine applies the gate
     const WeightRef* w_gi = v.get("ffn_gate_inp_shexp.weight");
     sh_read = glue_on && w_gi != nullptr && w_gi->bytes == (uint64_t) N * 2 && ((uintptr_t) w_gi->data & 15u) == 0;
+    // without the fused read: the router's GEMV dots the gate input as one more row, with the same branch and combine
+    const bool sh_router = !sh_read && !dec_hc && dm && router_multi && sh_fork && sh_stream == v_.sh_hi_ &&
+                           v_.sh_hi2_ != nullptr && w_gi != nullptr && w_gi->bytes == (uint64_t) N * 2 &&
+                           ((uintptr_t) w_gi->data & 3u) == 0 && bf16_gemv_fp32_mmvf_gate_ok(N, n);
+    sh_read = sh_read || sh_router;
+    cudaStream_t sh_up2 = sh_router && !v_.up_beside_ ? nullptr : v_.sh_hi2_;   // the up projection's branch
     {
         PdlScope ps(pdl);   // after the out projection's kernel
         if (dec_hc) {
@@ -285,7 +291,7 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
     if (sh_fork) {
         cudaEventRecord(v_.ev_fork_, cs);
         cudaStreamWaitEvent(sh_stream, v_.ev_fork_, 0);
-        if (sh_read) cudaStreamWaitEvent(v_.sh_hi2_, v_.ev_fork_, 0);
+        if (sh_read && sh_up2 != nullptr) cudaStreamWaitEvent(sh_up2, v_.ev_fork_, 0);
     }
     // the window's rows routed in 2 launches (one router GEMV reading the weight once, one top-10) instead of 2
     // per token; every row's arithmetic is the single-token call's
@@ -293,8 +299,12 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
     } else if (router_multi) {
         try {
             PdlScope ps(pdl);   // after the hc read's last kernel (the fork adds no node on this stream)
-            bf16_gemv_fp32_mmvf_multi(v_.mixed_, N, (const uint16_t*) w_router->data, v_.logits_, NE, N,
-                                      NE, n, cs);
+            if (sh_router)
+                bf16_gemv_fp32_mmvf_gate(v_.mixed_, N, (const uint16_t*) w_router->data, v_.logits_, NE, N, NE, n,
+                                         (const uint16_t*) w_gi->data, v_.sh_g_, cs);
+            else
+                bf16_gemv_fp32_mmvf_multi(v_.mixed_, N, (const uint16_t*) w_router->data, v_.logits_, NE, N,
+                                          NE, n, cs);
             native_router_top10_multi(v_.logits_, v_.ids_, v_.w_, n, cs);
         } catch (const std::exception& e) { err = "verify router: " + std::string(e.what()); return false; }
     } else
@@ -403,7 +413,7 @@ bool Verifier::WindowRecorder::pre(int64_t l) {
         try {
             PdlScope psh(false);   // the side chain's kernels follow each other
             if (sh_read)
-                shared_expert_multi_rows(n, nsw, v_.sh_gate_, v_.sh_up_, v_.shared_, N, g.n_ff, sh_stream, v_.sh_hi2_,
+                shared_expert_multi_rows(n, nsw, v_.sh_gate_, v_.sh_up_, v_.shared_, N, g.n_ff, sh_stream, sh_up2,
                                          v_.ev_sh2_);
             else
                 shared_expert_multi(n, xm, nsw, (const uint16_t*) wgi->data, v_.sh_gate_,
