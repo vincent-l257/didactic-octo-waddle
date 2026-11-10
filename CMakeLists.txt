@@ -239,6 +239,7 @@ add_library(kernels STATIC src/kernels/cuda/dequant_s2.cu src/kernels/cuda/s2_ge
                         src/kernels/cuda/verify_kernels.cu
                         src/kernels/cuda/dec_gdn_rec.cu
                         src/kernels/cuda/dense_tc.cu
+                        src/kernels/cuda/q6k_f16.cu
                         src/kernels/cuda/mid_chain.cu
                         src/kernels/cuda/qsa_mid.cu
                         src/kernels/cuda/wait_abort.cu
@@ -786,6 +787,12 @@ target_include_directories(dense_tc_parity PRIVATE ${_gpu_include_directories})
 target_link_libraries(dense_tc_parity PRIVATE kernels ${_gpu_runtime_target})
 basalt_gpu_test(NAME dense_tc_parity COMMAND dense_tc_parity)
 set_tests_properties(dense_tc_parity PROPERTIES SKIP_RETURN_CODE 77)
+# the fp16 tensor-core Q6_K projections (cc 7.0) against a double reference and the q8_1 path (synthetic, GPU; --bench)
+add_executable(q6k_f16_parity tests/kernels/q6k_f16_parity.cpp)
+target_include_directories(q6k_f16_parity PRIVATE ${_gpu_include_directories})
+target_link_libraries(q6k_f16_parity PRIVATE kernels ${_gpu_runtime_target})
+basalt_gpu_test(NAME q6k_f16_parity COMMAND q6k_f16_parity)
+set_tests_properties(q6k_f16_parity PROPERTIES SKIP_RETURN_CODE 77)
 # the DEC_COMMIT launches against the commit graph's per-layer calls, bitwise (synthetic, GPU; --bench)
 add_executable(dec_commit_parity tests/kernels/dec_commit_parity.cpp)
 target_include_directories(dec_commit_parity PRIVATE ${_gpu_include_directories})
