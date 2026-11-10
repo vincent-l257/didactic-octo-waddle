@@ -86,6 +86,13 @@ bool Request::refill_issue(PfPart& p, std::string& e, bool assign) {
     return true;
 }
 
+// a part whose copies went out when its card finished the read: its rows are marked now, then waited for
+bool Request::refill_early(PfPart& p, std::string& e) {
+    for (const auto& [i, slot] : p.lent) runtime_.host_res[(size_t) i] = slot;
+    p.early = false;
+    return refill_wait(p, e);
+}
+
 bool Request::refill_wait(PfPart& p, std::string& e) {
     const basalt::core::OnDevice on(p.dev);
     if (!p.cache->sync_queued(e)) return false;
@@ -96,6 +103,7 @@ bool Request::refill_wait(PfPart& p, std::string& e) {
 
 bool Request::refill_one(PfPart& p, std::string& e) {
     if (p.lent.empty()) return true;
+    if (p.early) return refill_early(p, e);
     if (ov_copied) {
         for (const auto& [i, slot] : p.lent) runtime_.host_res[(size_t) i] = slot;
         p.lent.clear();
@@ -110,18 +118,23 @@ bool Request::refill_one(PfPart& p, std::string& e) {
 // for - the same copies into the same slots, so the same cache; one stage: refill_one exactly.
 bool Request::refill(std::string& e) {
     int64_t n_lent = 0, n_parts = 0;
-    for (PfPart& p : runtime_.pf_parts)
-        if (!p.lent.empty()) { n_lent += (int64_t) p.lent.size(); ++n_parts; }
+    std::vector<bool> marked(runtime_.stages.size() + 1, false);
+    for (size_t k = 0; k < runtime_.pf_parts.size(); ++k)
+        if (!runtime_.pf_parts[k].lent.empty()) {
+            n_lent += (int64_t) runtime_.pf_parts[k].lent.size();
+            ++n_parts;
+            if (k < marked.size()) marked[k] = true;
+        }
     if (n_parts > 1) {
         for (PfPart& p : runtime_.pf_parts)
-            if (!p.lent.empty() && !refill_issue(p, e)) return false;
+            if (!p.lent.empty() && !p.early && !refill_issue(p, e)) return false;
         for (PfPart& p : runtime_.pf_parts)
-            if (!p.lent.empty() && !refill_wait(p, e)) return false;
+            if (!p.lent.empty() && !(p.early ? refill_early(p, e) : refill_wait(p, e))) return false;
     } else {
         for (PfPart& p : runtime_.pf_parts)
             if (!p.lent.empty() && !refill_one(p, e)) return false;
     }
-    if (n_parts > 0) runtime_.res_upload();
+    if (n_parts > 0) runtime_.res_upload(runtime_.pf_parts.size() == marked.size() ? marked : std::vector<bool>(marked.size(), true));
     ov_copied = false;
     return true;
 }
@@ -132,6 +145,13 @@ bool Request::refill(std::string& e) {
 // `chunk` > 0: that chunk (a split read's), its first one `head` tokens (0: none)
 bool Request::lend(int64_t tokens, std::string& e, int64_t chunk, int64_t head) {
     if (runtime_.pf_parts.empty()) return true;                     // its own buffers: nothing to lend
+    bool back = false;
+    for (PfPart& p : runtime_.pf_parts)   // a loan refilled early goes back before a new one is taken
+        if (p.early) {
+            if (!refill_early(p, e)) return false;
+            back = true;
+        }
+    if (back) runtime_.res_upload();
     // the ring depth this read's layout uses; every size computed below (and the layout) follows it, and
     // the full depth is restored on the way out for the sizing done elsewhere
     const bool beside = runtime_.batch_on() && (tokens > runtime_.kReadAlone || resumed_chunk > 0);

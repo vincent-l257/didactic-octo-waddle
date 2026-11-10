@@ -69,11 +69,17 @@ bool resident_spare_swaps(basalt::core::FileExpertSource& src, const std::vector
 
 // a layer split's later stages keep a copy of the residency table on their devices, and swap on their own
 void Runtime::res_upload() {
-    if (d_res != nullptr)
+    res_upload(std::vector<bool>(stages.size() + 1, true));
+}
+
+// a card whose rows did not change is left alone: an upload waits behind whatever else its link carries
+void Runtime::res_upload(const std::vector<bool>& parts) {
+    if (d_res != nullptr && parts[0])
         res_put(d_res);
-    for (auto& st : stages) {
-        const basalt::core::OnDevice on(st->dev);
-        res_put(st->d_res);
+    for (size_t i = 0; i < stages.size(); ++i) {
+        if (i + 1 >= parts.size() || !parts[i + 1]) continue;
+        const basalt::core::OnDevice on(stages[i]->dev);
+        res_put(stages[i]->d_res);
     }
 }
 

@@ -686,6 +686,7 @@ int Runtime::init_conversations() {
             basalt::prefill::Prefill& stage_sp = i == 0 ? sp : stages[i - 1]->sp;
             basalt::core::SessionState& stage_ss = i == 0 ? ss : stages[i - 1]->ss;
             stage_sp.on_stage_chunk = [&, i](int64_t done, std::string& e) -> bool {
+                if (i < stages.size() && stage_reached) stage_reached(i, done);
                 if (o.prompt_cache <= 0 || o.prompt_cache_every <= 0 || done < part_next[i]) return true;
                 part_next[i] = done + o.prompt_cache_every;
                 ConvCheckpoint part;   // this stage's state at `done` (its stream is synchronized)

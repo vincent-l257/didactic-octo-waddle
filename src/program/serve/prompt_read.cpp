@@ -14,8 +14,18 @@ bool Request::read_part(int64_t a0, int64_t b0, std::string& e) {
         // each stage's busy time and streamed experts for this read
         std::vector<basalt::prefill::PrefillStats> s0{runtime_.sp.stats()};
         for (auto& st : runtime_.stages) s0.push_back(st->sp.stats());
+        // a layer split: a stage's loan is refilled once it has read its layers of the last chunk, while the
+        // later stages read theirs (each stage touches only its own part)
+        if (!runtime_.stages.empty() && !runtime_.batch_on() && runtime_.pf_parts.size() == runtime_.stages.size() + 1)
+            runtime_.stage_reached = [this, b0](size_t i, int64_t done) {
+                PfPart& p = runtime_.pf_parts[i];
+                if (done != b0 || p.lent.empty() || p.early) return;
+                std::string re;
+                p.early = refill_issue(p, re, false);
+            };
         const auto tr = Clock::now();
         const bool ok = runtime_.sp.run(ids.data() + a0, b0 - a0, a0, e);
+        runtime_.stage_reached = nullptr;
         if (lend_pool) runtime_.sp.set_cpu_pool(nullptr);
         if (ok && !runtime_.stages.empty() && b0 - a0 >= 1024) {
             std::string parts;

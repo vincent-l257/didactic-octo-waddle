@@ -178,6 +178,7 @@ private:
         int32_t first_now = -1;        // where its buffers are laid out now
         int64_t lent_chunk = 0;
         std::vector<std::pair<int32_t, int32_t>> lent;
+        bool early = false;            // its refill copies are queued, its rows not marked yet
     };
     std::vector<PfPart> pf_parts{};
     // A prompt read beside decoding slots lends at most this many cache slots, so their experts stay in the
@@ -260,6 +261,9 @@ private:
     std::mutex part_mu{};
     std::map<int64_t, std::vector<ConvCheckpoint>> part_at{};   // position -> one part per stage
     std::vector<int64_t> part_next{};
+    // A layer split: stage `i` (0: CUDA0) reached `done` in the read in progress (its stream synchronized, on
+    // its own thread)
+    std::function<void(size_t i, int64_t done)> stage_reached{};
     // why the last checkpoint_at failed - a failed device sync is the GPU itself, not the checkpoint, and the error
     // says so
     std::string ckpt_why{};
@@ -518,6 +522,7 @@ private:
     bool checkpoint_at(int64_t L, std::vector<ConvCheckpoint>* parts = nullptr, bool defer = false,
                        ConvCheckpoint::Source source = ConvCheckpoint::kPeriodic);
     void res_upload();
+    void res_upload(const std::vector<bool>& parts);   // CUDA0, then the stages: only those marked
     bool adapt_peers(const std::vector<int32_t>& r0, std::string& perr);
     void apply_pending(bool wait, bool exchanges = true);
     void rank_swaps(std::vector<Swap>& swaps, bool across);

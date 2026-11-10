@@ -188,6 +188,7 @@ private:
     bool read_windows(int64_t a, int64_t b, std::string& e);
     bool refill_issue(PfPart& p, std::string& e, bool assign = true);
     bool refill_wait(PfPart& p, std::string& e);
+    bool refill_early(PfPart& p, std::string& e);
     bool refill_one(PfPart& p, std::string& e);
     bool refill(std::string& e);
     bool lend(int64_t tokens, std::string& e, int64_t chunk = 0, int64_t head = 0);
