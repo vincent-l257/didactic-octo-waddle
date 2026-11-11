@@ -102,7 +102,9 @@ and 1024 -> 4100): relative RMS 3.5-3.6e-4 for this path, 8.1-9.5e-3 for native_
 rows. Every window width takes this arithmetic, so the width guarantee of
 [Speculative decoding](#speculative-decoding-does-not-change-output) holds on these cards too.
 
-Quality gate (decode path, cc 7.0): _pending, the maintainer's PPL/KLD run_.
+Quality (decode path, IQ4_XS on three cards with the V100 last, teacher-forced PPL over 20 chunks of 8,192 tokens, no
+BF16 base on that machine so no KLD): 3.1863 before, 3.1850 with this path; paired NLL difference -0.00041 (95%
+interval -0.0011 to +0.0002). A KLD gate against the BF16 reference is still to run.
 
 ## Speculative decoding does not change output
 
